@@ -237,6 +237,48 @@ Compiler une application Java nécessite un JDK et Maven, mais l'exécuter ne n�
 - `COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar` : récupère uniquement le `.jar` produit à l'étape de build et le renomme `myapp.jar`.
 - `ENTRYPOINT ["java", "-jar", "myapp.jar"]` : commande lancée au démarrage du conteneur, qui exécute l'application.
 
+### 2.4 Backend API connectée à la base de données
+
+Le dossier `src` et le fichier `pom.xml` ont été remplacés par ceux du dépôt fourni (https://github.com/takima-training/simple-api-student), qui utilise Spring Boot 3.4.2. Le Dockerfile multistage est resté identique.
+
+**Configuration** (`src/main/resources/application.yml`, section `datasource`) :
+
+```yaml
+  datasource:
+    url: jdbc:postgresql://database:5432/db
+    username: usr
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+```
+
+- **Accès au conteneur de base de données** : les deux conteneurs sont sur le réseau `app-network`, où chaque conteneur est joignable par son nom. L'URL utilise donc `database` (le nom du conteneur) et non `localhost`, qui désignerait le conteneur backend lui-même. Le réseau Docker remplace l'option `--link`, dépréciée.
+- **Mot de passe** : `${DB_PASSWORD}` est lu dans une variable d'environnement passée au lancement avec `-e`, pour ne pas l'écrire dans le code (même logique que la question 1-1).
+
+**Commandes :**
+
+```bash
+docker build -t bunny/simple-api .
+docker run -d --name simple-api --network app-network -e DB_PASSWORD=pwd -p 8080:8080 bunny/simple-api
+```
+
+**Vérification :** les logs (`docker logs simple-api`) montrent la connexion à PostgreSQL 17.2, puis `Started SimpleApiApplication`. L'endpoint http://localhost:8080/departments/IRC/students renvoie l'étudiant Eli Copter du département IRC.
+
+**Endpoints disponibles :**
+
+| Méthode | URL | Rôle |
+|---|---|---|
+| GET | `/departments` | Liste des départements |
+| GET | `/departments/{nom}` | Un département |
+| GET | `/departments/{nom}/students` | Étudiants d'un département |
+| GET | `/departments/{nom}/count` | Nombre d'étudiants d'un département |
+| GET | `/students` | Liste des étudiants |
+| GET | `/students/{id}` | Un étudiant |
+| POST | `/students` | Créer un étudiant |
+| PUT | `/students/{id}` | Modifier un étudiant |
+| DELETE | `/students/{id}` | Supprimer un étudiant |
+
+**Problème rencontré :** au premier lancement, l'application refusait de démarrer (`'url' attribute is not specified`) : la configuration `datasource` n'était pas prise en compte. Après correction de `application.yml`, il a fallu **reconstruire l'image**, car la configuration est intégrée au `.jar` lors du build.
+
 ---
 
 ## 3. Serveur HTTP
