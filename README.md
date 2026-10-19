@@ -283,27 +283,191 @@ docker run -d --name simple-api --network app-network -e DB_PASSWORD=pwd -p 8080
 
 ## 3. Serveur HTTP
 
-<!-- À COMPLÉTER -->
+### 3.1 Page d'accueil statique
+
+Image de base : `httpd:2.4-alpine`, l'image officielle du serveur Apache, en version Alpine (légère). Le dossier servi par défaut est `/usr/local/apache2/htdocs/`.
+
+```dockerfile
+FROM httpd:2.4-alpine
+COPY index.html /usr/local/apache2/htdocs/
+```
+
+```bash
+docker build -t bunny/http-server .
+docker run -d -p 8081:80 --name http-server --network app-network bunny/http-server
+```
+
+Le port 80 de la machine hôte étant déjà utilisé, le conteneur a été publié sur le port **8081** (http://localhost:8081).
+
+Commandes de vérification :
+- `docker stats` : consommation CPU, mémoire et réseau de chaque conteneur en temps réel ;
+- `docker inspect http-server` : configuration complète du conteneur (image, réseau, ports, variables…) ;
+- `docker logs http-server` : journaux d'Apache, dont les requêtes reçues.
+
+### 3.2 Configuration
+
+La configuration par défaut a été récupérée depuis le conteneur en cours d'exécution :
+
+```bash
+docker cp http-server:/usr/local/apache2/conf/httpd.conf ./httpd.conf
+```
+
+`docker cp` a été préféré à `docker exec ... cat ... > httpd.conf` : sous PowerShell, la redirection `>` enregistre le fichier dans un encodage (UTF-16) qu'Apache ne sait pas lire.
+
+### 3.3 Reverse proxy
+
+Modifications apportées à `httpd.conf` :
+
+1. Activation des modules proxy (suppression du `#` en début de ligne) :
+   ```
+   LoadModule proxy_module modules/mod_proxy.so
+   LoadModule proxy_http_module modules/mod_proxy_http.so
+   ```
+2. Ajout d'un hôte virtuel qui transmet toutes les requêtes au backend :
+   ```
+   <VirtualHost *:80>
+   ProxyPreserveHost On
+   ProxyPass / http://simple-api:8080/
+   ProxyPassReverse / http://simple-api:8080/
+   </VirtualHost>
+   ```
+
+- `ProxyPass` : transmet les requêtes reçues sur `/` au backend. `simple-api` est le nom du conteneur backend, joignable par ce nom sur le réseau `app-network`.
+- `ProxyPassReverse` : réécrit les en-têtes des réponses du backend (redirections) pour qu'ils pointent vers le proxy et non vers le backend.
+- `ProxyPreserveHost On` : conserve le nom d'hôte demandé par le client lors de la transmission.
+
+La configuration modifiée est copiée dans l'image :
+
+```dockerfile
+FROM httpd:2.4-alpine
+COPY index.html /usr/local/apache2/htdocs/
+COPY httpd.conf /usr/local/apache2/conf/httpd.conf
+```
+
+**Vérification :** http://localhost:8081/departments/IRC/students renvoie l'étudiant Eli Copter : la requête arrive sur Apache, qui la transmet au backend, qui interroge la base.
 
 ### Question 1-5 : Pourquoi a-t-on besoin d'un reverse proxy ?
 
-<!-- À COMPLÉTER -->
+Un reverse proxy est un serveur placé devant l'application, qui reçoit toutes les requêtes des clients et les transmet au bon service.
+
+- **Un seul point d'entrée** : seul Apache est exposé à l'extérieur. Le backend et la base de données restent cachés dans le réseau Docker, ce qui réduit la surface d'attaque.
+- **Centralisation** : le HTTPS (certificats SSL), les journaux et les règles d'accès sont gérés à un seul endroit, sans modifier l'application.
+- **Répartition de charge** : le proxy peut distribuer les requêtes entre plusieurs instances du backend.
+- **Plusieurs services sous une même adresse** : il peut servir un front-end et l'API sous le même nom de domaine, en routant selon l'URL.
 
 ---
 
 ## 4. Docker Compose
 
+Les trois conteneurs sont désormais décrits dans un seul fichier, `docker-compose.yml`, à la racine du projet. Une seule commande construit les images et démarre toute l'application :
+
+```bash
+docker compose up -d --build
+```
+
+L'API est accessible **uniquement via Apache** : http://localhost:8081/departments/IRC/students. Le port 8080 du backend n'est plus publié.
+
+**Adaptation du reverse proxy :** dans compose, chaque conteneur est joignable par son **nom de service**. Le backend s'appelant `backend`, la configuration Apache a été modifiée :
+
+```
+ProxyPass / http://backend:8080/
+ProxyPassReverse / http://backend:8080/
+```
+
+**Gestion du mot de passe :** il est stocké dans un fichier `.env` à la racine, lu automatiquement par compose, et exclu de git via `.gitignore` :
+
+```
+POSTGRES_PASSWORD=pwd
+```
+
+**Problème rencontré :** au premier lancement, Apache renvoyait une erreur **503 Service Unavailable**, car le backend n'avait pas encore fini de démarrer. Après une connexion échouée, Apache met le backend en pénalité pendant 60 secondes. Une fois le backend démarré, un redémarrage d'Apache (`docker compose restart httpd`) a résolu le problème.
+
 ### Question 1-6 : Pourquoi docker-compose est-il si important ?
 
-<!-- À COMPLÉTER -->
+Sans compose, il faut lancer chaque conteneur à la main, dans le bon ordre, avec de longues commandes `docker run` (réseaux, volumes, variables, ports), et recommencer à chaque modification. C'est long et source d'erreurs.
+
+Docker-compose permet de :
+- **décrire toute l'application dans un seul fichier**, versionné dans git : la configuration devient du code, lisible et reproductible ;
+- **tout démarrer, arrêter ou reconstruire en une commande** ;
+- **gérer l'ordre de démarrage** et les dépendances entre services (`depends_on`) ;
+- **créer automatiquement** les réseaux et les volumes ;
+- **reproduire le même environnement** sur n'importe quelle machine (un collègue, un serveur de test).
 
 ### Question 1-7 : Principales commandes docker-compose
 
-<!-- À COMPLÉTER -->
+| Commande | Rôle |
+|---|---|
+| `docker compose up -d --build` | Construit les images et démarre tous les services en arrière-plan |
+| `docker compose ps` | Affiche l'état des services |
+| `docker compose logs -f <service>` | Affiche et suit les logs d'un service |
+| `docker compose stop` | Arrête les services sans supprimer les conteneurs |
+| `docker compose start` | Redémarre des services arrêtés |
+| `docker compose restart <service>` | Redémarre un service |
+| `docker compose build` | Reconstruit les images |
+| `docker compose down` | Arrête et supprime les conteneurs et les réseaux (les volumes sont conservés) |
+| `docker compose down -v` | Supprime aussi les volumes, donc les données de la base |
+| `docker compose exec <service> sh` | Ouvre un terminal dans un conteneur en cours d'exécution |
 
 ### Question 1-8 : Documentation du fichier docker-compose.yml
 
-<!-- À COMPLÉTER -->
+```yaml
+services:
+  database:
+    build: ./database
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - back-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usr -d db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend/simpleapi
+    environment:
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - back-network
+      - front-network
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+  httpd:
+    build: ./http-server
+    ports:
+      - "8081:80"
+    networks:
+      - front-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  back-network:
+  front-network:
+
+volumes:
+  db-data:
+```
+
+**Les services :**
+- **`database`** : construit depuis `./database`. Le mot de passe est lu dans `.env`. Les données sont stockées dans le volume `db-data`. Un **healthcheck** (`pg_isready`) vérifie toutes les 5 secondes que PostgreSQL accepte réellement les connexions.
+- **`backend`** : construit depuis `./backend/simpleapi`. Il reçoit le même mot de passe sous le nom `DB_PASSWORD`, attendu par `application.yml`. Grâce à `condition: service_healthy`, il ne démarre que lorsque la base est prête, et pas seulement lancée.
+- **`httpd`** : construit depuis `./http-server`. C'est le **seul service dont un port est publié** (8081 sur l'hôte vers 80 dans le conteneur) : c'est le point d'entrée unique de l'application.
+
+**Les choix d'architecture :**
+- **Ségrégation des réseaux** : deux réseaux distincts. `front-network` relie Apache et le backend ; `back-network` relie le backend et la base. Apache ne peut donc pas joindre la base directement : seul le backend fait le lien.
+- **Aucun port exposé pour le backend et la base**, comme demandé : ils ne sont accessibles que depuis les réseaux Docker.
+- **Secrets hors du code** : le mot de passe est dans `.env`, exclu de git.
+- **Politique de redémarrage** `unless-stopped` : un service qui plante redémarre automatiquement, sauf s'il a été arrêté volontairement.
+- **Persistance** : le volume nommé `db-data` conserve les données de la base après un `docker compose down`.
 
 ---
 

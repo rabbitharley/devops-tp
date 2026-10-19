@@ -1,0 +1,44 @@
+services:
+  database:
+    build: ./database
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - back-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usr -d db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend/simpleapi
+    environment:
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - back-network
+      - front-network
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+  httpd:
+    build: ./http-server
+    ports:
+      - "8081:80"
+    networks:
+      - front-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  back-network:
+  front-network:
+
+volumes:
+  db-data:
