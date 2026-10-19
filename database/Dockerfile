@@ -13,6 +13,7 @@ RUN python3 -m venv venv
 # Use the virtual environment for all commands
 ENV PATH="/usr/src/app/venv/bin:$PATH"
 
+
 # Copy and install dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
@@ -26,3 +27,12 @@ EXPOSE 5000
 
 # Run the application inside the virtual environment
 CMD ["python", "/usr/src/app/app.py"]
+
+
+FROM postgres:17.2-alpine
+
+ENV POSTGRES_DB=db \
+    POSTGRES_USER=usr
+
+COPY sql/ /docker-entrypoint-initdb.d/
+
