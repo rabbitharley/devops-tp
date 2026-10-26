@@ -31,3 +31,44 @@ jobs:
       # Les tests d'intégration démarrent un PostgreSQL grâce à Testcontainers
       - name: Build and test with Maven
         run: mvn clean verify --file ./backend/simpleapi/pom.xml
+
+  # Job 2 : construire les 3 images Docker et les publier sur Docker Hub
+  build-and-push-docker-image:
+    # Ne démarre que si test-backend a réussi : on ne livre pas un code qui ne passe pas les tests
+    needs: test-backend
+    runs-on: ubuntu-24.04
+    steps:
+      # Récupère le code du dépôt
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Connexion à Docker Hub avec les identifiants stockés dans les secrets GitHub
+      # --password-stdin évite que le token apparaisse dans la commande ou les logs
+      - name: Login to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      # Image du backend, construite depuis le dossier qui contient son Dockerfile
+      - name: Build image and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/simpleapi
+          # Les noms d'images doivent être en minuscules
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-simple-api:latest
+          # On construit sur toutes les branches, mais on ne publie que depuis main
+          push: ${{ github.ref == 'refs/heads/main' }}
+
+      # Image de la base de données
+      - name: Build image and push database
+        uses: docker/build-push-action@v6
+        with:
+          context: ./database
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-database:latest
+          push: ${{ github.ref == 'refs/heads/main' }}
+
+      # Image du serveur HTTP (reverse proxy Apache)
+      - name: Build image and push httpd
+        uses: docker/build-push-action@v6
+        with:
+          context: ./http-server
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-httpd:latest
+          push: ${{ github.ref == 'refs/heads/main' }}
