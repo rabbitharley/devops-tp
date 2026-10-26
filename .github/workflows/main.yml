@@ -1,0 +1,33 @@
+# Nom du pipeline, affiché dans l'onglet Actions de GitHub
+name: CI devops 2025
+
+# Déclencheurs : un push sur main ou develop, et toute pull request
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+jobs:
+  # Job 1 : compiler l'API et lancer tous ses tests
+  test-backend:
+    # Machine virtuelle Ubuntu fournie par GitHub (Docker y est préinstallé)
+    runs-on: ubuntu-24.04
+    steps:
+      # Récupère le code du dépôt sur la machine virtuelle
+      - uses: actions/checkout@v4
+
+      # Installe le JDK 21 (Temurin, comme dans nos Dockerfiles)
+      # cache: maven garde les dépendances entre deux exécutions
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Compile l'application et lance les tests unitaires et d'intégration
+      # Les tests d'intégration démarrent un PostgreSQL grâce à Testcontainers
+      - name: Build and test with Maven
+        run: mvn clean verify --file ./backend/simpleapi/pom.xml
