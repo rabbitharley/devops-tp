@@ -6,16 +6,37 @@ Un dossier par image Docker :
 
 ```
 devops-tp/
-├── flask-app/        # TD : application Flask de découverte
-├── database/         # Base de données PostgreSQL
+├── flask-app/              # TD : application Flask de découverte
+├── database/               # Base de données PostgreSQL
 │   ├── Dockerfile
 │   └── sql/
 │       ├── 01-CreateScheme.sql
 │       └── 02-InsertData.sql
-├── backend/          # API Java / Spring Boot
-├── http-server/      # Serveur HTTP Apache (reverse proxy)
-└── README.md         # Ce rapport
+├── backend/
+│   ├── hello-world/        # Hello World Java (simple puis multistage)
+│   │   ├── Dockerfile
+│   │   └── Main.java
+│   └── simpleapi/          # API Spring Boot connectée à la base
+│       ├── Dockerfile
+│       ├── pom.xml
+│       └── src/
+├── http-server/            # Serveur HTTP Apache (reverse proxy)
+│   ├── Dockerfile
+│   ├── httpd.conf
+│   └── index.html
+├── docker-compose.yml      # Orchestration des trois services
+├── .env                    # Mot de passe de la base (exclu de git)
+└── README.md               # Ce rapport
 ```
+
+**Architecture finale :**
+
+```
+Navigateur ──► httpd (Apache, port 8081) ──► backend (Spring Boot, 8080) ──► database (PostgreSQL, 5432)
+                    front-network                       back-network
+```
+
+Seul Apache est accessible depuis l'hôte ; le backend et la base ne sont joignables qu'à l'intérieur des réseaux Docker.
 
 ---
 
@@ -475,8 +496,44 @@ volumes:
 
 ### Question 1-9 : Commandes de publication et images publiées
 
-<!-- À COMPLÉTER -->
+Les images construites par docker-compose sont nommées d'après le dossier du projet (`devops-tp-database`, `devops-tp-backend`, `devops-tp-httpd`). Pour les publier, il faut leur donner un nom de la forme `utilisateur/image:version`.
+
+```bash
+# Connexion au compte Docker Hub
+docker login
+
+# Ajout d'un tag avec le nom d'utilisateur et un numéro de version
+docker tag devops-tp-database <utilisateur>/tp-database:1.0
+docker tag devops-tp-backend  <utilisateur>/tp-backend:1.0
+docker tag devops-tp-httpd    <utilisateur>/tp-httpd:1.0
+
+# Envoi des images sur Docker Hub
+docker push <utilisateur>/tp-database:1.0
+docker push <utilisateur>/tp-backend:1.0
+docker push <utilisateur>/tp-httpd:1.0
+```
+
+- `docker tag` ne copie pas l'image : il lui ajoute un second nom.
+- Le numéro de version (`1.0`) remplace le tag `latest` utilisé jusqu'ici. Il permet d'identifier précisément une version, et de revenir à une version précédente si une nouvelle pose problème.
+
+**Images publiées** (visibles sur https://hub.docker.com/u/<utilisateur>) :
+
+| Image | Contenu |
+|---|---|
+| `<utilisateur>/tp-database:1.0` | PostgreSQL 17.2 avec les scripts d'initialisation (tables et données) |
+| `<utilisateur>/tp-backend:1.0` | API Spring Boot connectée à la base |
+| `<utilisateur>/tp-httpd:1.0` | Apache configuré en reverse proxy vers le backend |
+
+Une courte description a été ajoutée à chaque image sur Docker Hub, pour pouvoir les réutiliser plus tard.
 
 ### Question 1-10 : Pourquoi publier nos images dans un dépôt en ligne ?
 
-<!-- À COMPLÉTER -->
+Jusqu'ici, les images n'existaient que sur notre machine. Les publier dans un registre en ligne permet de :
+
+- **partager** : les autres membres de l'équipe récupèrent l'image prête à l'emploi avec `docker pull`, sans avoir à la reconstruire ;
+- **déployer** : un serveur de test ou de production télécharge directement l'image, sans code source ni outils de build ;
+- **garantir la cohérence** : tout le monde exécute exactement la même image, avec les mêmes versions, d'où la fin du « ça marche sur ma machine » ;
+- **versionner** : grâce aux tags, on conserve un historique et on peut revenir à une version antérieure ;
+- **automatiser** : c'est la base des chaînes d'intégration et de déploiement continus (CI/CD), où une image construite automatiquement est publiée puis déployée.
+
+Docker Hub est un registre public. Les entreprises utilisent souvent un registre privé (auto-hébergé ou chez un fournisseur cloud) pour garder leurs images confidentielles.

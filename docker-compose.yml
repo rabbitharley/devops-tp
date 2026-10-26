@@ -2,13 +2,16 @@ services:
   database:
     build: ./database
     environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGPORT: ${DB_PORT}
     volumes:
       - db-data:/var/lib/postgresql/data
     networks:
       - back-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U usr -d db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -17,7 +20,12 @@ services:
   backend:
     build: ./backend/simpleapi
     environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKEND_PORT: ${BACKEND_PORT}
     networks:
       - back-network
       - front-network
@@ -28,8 +36,12 @@ services:
 
   httpd:
     build: ./http-server
+    environment:
+      BACKEND_HOST: ${BACKEND_HOST}
+      BACKEND_PORT: ${BACKEND_PORT}
+      HTTPD_PORT: ${HTTPD_PORT}
     ports:
-      - "8081:80"
+      - "${HTTP_PORT}:${HTTPD_PORT}"
     networks:
       - front-network
     depends_on:
