@@ -15,3 +15,5 @@ backend_host: backend
 backend_port: "8080"
 httpd_port: "80"
 front_host: front
+# Mot de passe de la base, lu depuis le fichier chiffré vault.yml
+db_password: "{{ vault_db_password }}"

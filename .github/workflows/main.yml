@@ -79,7 +79,7 @@ jobs:
           context: ./front
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-front:latest
           push: ${{ github.ref == 'refs/heads/main' }}
-          
+
   # Job 3 : déployer l'application sur le serveur avec Ansible
   deploy:
     # Seulement après la publication des images, et seulement depuis main
@@ -102,12 +102,13 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/takima_key
           chmod 400 ~/.ssh/takima_key
 
-      # Lance le playbook ; le mot de passe de la base vient des secrets
-      # ANSIBLE_HOST_KEY_CHECKING évite la question "yes/no" à la première connexion
+            # Lance le playbook ; le mot de passe du vault vient des secrets GitHub
+      # Il est écrit dans un fichier temporaire, supprimé même en cas d'échec
       - name: Deploy with Ansible
         working-directory: ./ansible
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
-        run: ansible-playbook -i inventories/setup.yml playbook.yml -e "db_password=${{ secrets.DB_PASSWORD }}"
- 
-
+        run: |
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
+          trap 'rm -f .vault_pass' EXIT
+          ansible-playbook -i inventories/setup.yml playbook.yml --vault-password-file .vault_pass
