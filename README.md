@@ -537,3 +537,292 @@ Jusqu'ici, les images n'existaient que sur notre machine. Les publier dans un re
 - **automatiser** : c'est la base des chaînes d'intégration et de déploiement continus (CI/CD), où une image construite automatiquement est publiée puis déployée.
 
 Docker Hub est un registre public. Les entreprises utilisent souvent un registre privé (auto-hébergé ou chez un fournisseur cloud) pour garder leurs images confidentielles.
+---
+
+# TP 2 – GitHub Actions
+
+## Discover Github
+
+- Création d'une paire de clés SSH (`ssh-keygen -t rsa -b 4096`) : la clé **privée** reste sur le poste, la clé **publique** (`.pub`) est ajoutée au compte GitHub (*Settings > SSH and GPG keys*). Les opérations `clone` / `push` se font ensuite sans mot de passe.
+- Fork du projet de l'enseignant, clone en SSH, modification du `README.md`, puis `git add`, `git commit` et `git push origin main`.
+- Ajout d'une règle de protection sur la branche `main` (*Settings > Branches*) : elle empêche notamment le `push --force` et la suppression de la branche.
+
+## Pipeline CI/CD
+
+Le pipeline est défini dans `.github/workflows/main.yml`. Il se déclenche à chaque push sur `main` ou `develop`, et à chaque pull request.
+
+- **Job `test-backend` (CI)** : récupère le code (`actions/checkout`), installe le JDK 21 (`actions/setup-java`), puis lance `mvn clean verify --file ./backend/simpleapi/pom.xml`, qui compile l'API et exécute les tests unitaires et d'intégration.
+- **Job `build-and-push-docker-image` (CD)** : ne démarre que si les tests réussissent (`needs: test-backend`). Il se connecte à Docker Hub avec les secrets `DOCKERHUB_USERNAME` et `DOCKERHUB_TOKEN`, puis construit les trois images (backend, base de données, httpd) avec `docker/build-push-action`. Les images ne sont publiées que depuis la branche `main` : `push: ${{ github.ref == 'refs/heads/main' }}`.
+
+**Problèmes rencontrés :**
+- La branche s'appelait `master` alors que le workflow vise `main` : elle a été renommée (`git branch -m master main`), puis `main` a été définie comme branche par défaut sur GitHub.
+- Le fichier `SimpleApiApplication.java` était enregistré dans git sous le nom `SimpleapiApplication.java`. Windows ignore la casse, mais pas le runner Linux de GitHub : la compilation échouait. Correction avec `git mv` en passant par un nom intermédiaire.
+- Les secrets Docker Hub étaient vides dans le workflow : ils ont été recréés au bon endroit (*Settings > Secrets and variables > Actions > Repository secrets*).
+
+### Question 2-1 : Que sont les Testcontainers ?
+
+Testcontainers est une bibliothèque Java qui démarre de vrais conteneurs Docker pendant les tests. Dans ce projet, elle lance une base PostgreSQL au début des tests d'intégration, puis la supprime à la fin. On teste ainsi l'application contre une vraie base de données, identique à celle de production, sans rien installer sur la machine : Docker suffit. L'URL `jdbc:tc:postgresql://...` de `src/test/resources/application.yml` déclenche ce mécanisme.
+
+### Question 2-2 : Pourquoi utiliser des variables sécurisées ?
+
+Le fichier `main.yml` est versionné dans le dépôt, qui peut être public. Écrire le mot de passe Docker Hub dedans le rendrait lisible par tous. Les secrets GitHub sont chiffrés, ne sont plus lisibles une fois enregistrés, et sont masqués (`***`) dans les logs. Le pipeline peut donc s'authentifier sans que les identifiants n'apparaissent jamais dans le code ni dans les logs.
+
+### Question 2-3 : Pourquoi `needs: test-backend` sur le job Docker ?
+
+Par défaut, les jobs d'un workflow s'exécutent en parallèle. Sans `needs`, les images seraient construites et publiées en même temps que les tests, donc même si ces tests échouent. Avec `needs: test-backend`, le job Docker attend la fin des tests et n'est exécuté que s'ils réussissent : on ne publie jamais une image dont le code ne passe pas les tests.
+
+### Question 2-4 : Pourquoi pousser les images Docker ?
+
+Publier les images sur Docker Hub en fait des livrables prêts à être déployés. N'importe quel serveur ou membre de l'équipe peut les récupérer avec `docker pull`, sans recompiler le code, et tout le monde utilise exactement la même version. C'est le principe de la livraison continue : chaque modification validée par les tests produit automatiquement une version déployable. Ce sont d'ailleurs ces images qu'Ansible déploie sur le serveur au TP 3.
+
+---
+
+# TP 3 – Ansible
+
+## Mise en place
+
+Ansible n'étant pas disponible sous Windows, il est utilisé dans WSL (Ubuntu) : `sudo apt install ansible`.
+
+La clé privée fournie par l'enseignant est copiée dans `~/.ssh` côté Ubuntu, avec des droits restreints (`chmod 400`), car SSH refuse une clé lisible par d'autres utilisateurs. Elle n'est jamais placée dans le dépôt git.
+
+```bash
+ssh -i ~/.ssh/takima_key admin@<serveur>
+ansible all -m ping --private-key=~/.ssh/takima_key -u admin
+```
+
+Le module `ping` répond `pong` : le serveur est joignable, l'utilisateur `admin` existe et l'authentification SSH fonctionne. Sans l'option `-u admin` ni la clé, Ansible ne peut pas s'authentifier et la commande échoue.
+
+Installation d'Apache en commandes ad hoc :
+
+```bash
+ansible all -m apt -a "name=apache2 state=present" --private-key=~/.ssh/takima_key -u admin --become
+ansible all -m shell -a 'echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html' --private-key=~/.ssh/takima_key -u admin --become
+ansible all -m service -a "name=apache2 state=started" --private-key=~/.ssh/takima_key -u admin --become
+```
+
+Sans `--become`, l'installation échoue : installer un paquet demande les droits administrateur, qu'Ansible obtient via `sudo`.
+
+### Question 3-1 : Documenter l'inventaire et les commandes de base
+
+**Inventaire** (`ansible/inventories/setup.yml`) :
+
+```yaml
+all:
+  vars:
+    ansible_user: admin
+    ansible_ssh_private_key_file: ~/.ssh/takima_key
+  children:
+    prod:
+      hosts: <serveur>
+```
+
+- `all` regroupe tous les serveurs de l'inventaire.
+- `vars` définit des variables appliquées à tous les serveurs : l'utilisateur de connexion (`admin`, l'utilisateur par défaut des serveurs Debian) et le chemin de la clé SSH privée. Il n'est plus nécessaire de les passer à chaque commande.
+- `children` organise les serveurs en groupes ; le groupe `prod` contient notre serveur. On pourrait ajouter d'autres groupes (bases de données, proxys…) et cibler chacun séparément.
+
+Le fichier ne contient que le chemin de la clé, pas la clé elle-même : il peut être versionné sans risque.
+
+**Commandes de base :**
+
+| Commande | Rôle |
+|---|---|
+| `ansible all -i inventories/setup.yml -m ping` | Vérifie la connexion et l'authentification sur tous les serveurs |
+| `ansible all -i inventories/setup.yml -m setup -a "filter=ansible_distribution*"` | Récupère des *facts* : des informations découvertes sur le serveur, ici sa distribution (Debian) et sa version |
+| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | Désinstalle Apache. Relancer la commande ne change rien : Apache est déjà absent |
+
+Ansible est **déclaratif et idempotent** : on décrit l'état voulu (`state: present` ou `absent`), et Ansible n'agit que si le serveur n'est pas déjà dans cet état. La première exécution affiche `CHANGED`, les suivantes `SUCCESS` sans changement.
+
+### Question 3-2 : Documenter le playbook
+
+**`ansible/playbook.yml`** :
+
+```yaml
+- hosts: all
+  gather_facts: true
+  become: true
+
+  roles:
+    - docker
+```
+
+- `hosts: all` : le playbook s'applique à tous les serveurs de l'inventaire.
+- `gather_facts: true` : Ansible collecte les facts du serveur, dont la version de Debian, utilisée pour choisir le bon dépôt Docker.
+- `become: true` : les tâches s'exécutent en administrateur.
+- `roles` : la liste des rôles à appliquer.
+
+Le playbook se vérifie avec `ansible-playbook -i inventories/setup.yml playbook.yml --syntax-check`, puis s'exécute sans cette option.
+
+**Le rôle `docker`** a été créé avec `ansible-galaxy init roles/docker`. Seuls les dossiers utiles ont été conservés : `tasks` (les tâches) et `handlers`. Ses tâches (`roles/docker/tasks/main.yml`) installent Docker en suivant la documentation officielle :
+
+1. installation des paquets prérequis (`apt`) ;
+2. ajout de la clé GPG de Docker (`get_url`), qui permet de vérifier l'authenticité des paquets ;
+3. ajout du dépôt officiel Docker (`apt_repository`), adapté à la version de Debian grâce au fact `distribution_release` ;
+4. installation de `docker-ce` (`apt`) ;
+5. installation du SDK Docker pour Python dans un environnement virtuel (`pip`), nécessaire aux modules Ansible `docker_container` et `docker_network` ;
+6. démarrage du service Docker et activation au démarrage du serveur (`service`).
+
+**Écarts par rapport au modèle de l'énoncé :**
+- le module `apt_key` est déprécié sous Debian 12 ; la clé est téléchargée avec `get_url` dans `/etc/apt/keyrings`, et référencée par `signed-by` dans le dépôt, comme le recommande la documentation de Docker ;
+- la commande `pip install docker` était exécutée à chaque lancement du playbook ; le module `pip` avec l'option `virtualenv` la rend idempotente.
+
+Relancer le playbook n'affiche que des tâches `ok` : Docker est déjà installé, rien n'est modifié. Ranger l'installation dans un rôle la rend réutilisable et garde le playbook court et lisible.
+
+Vérification sur le serveur :
+
+```bash
+ansible all -i inventories/setup.yml -m command -a "docker --version" --become
+ansible all -i inventories/setup.yml -m command -a "systemctl is-active docker" --become
+```
+
+### Question 3-3 : Documenter la configuration des tâches docker_container
+
+<!-- À COMPLÉTER après le déploiement de l'application -->
+
+### Déploiement continu : est-il sûr de déployer automatiquement chaque nouvelle image ?
+
+<!-- À COMPLÉTER -->
+
+---
+
+# TP 2 – GitHub Actions
+
+## Discover Github
+
+- Création d'une paire de clés SSH (`ssh-keygen -t rsa -b 4096`) : la clé **privée** reste sur le poste, la clé **publique** (`.pub`) est ajoutée au compte GitHub (*Settings > SSH and GPG keys*). Les opérations `clone` / `push` se font ensuite sans mot de passe.
+- Fork du projet de l'enseignant, clone en SSH, modification du `README.md`, puis `git add`, `git commit` et `git push origin main`.
+- Ajout d'une règle de protection sur la branche `main` (*Settings > Branches*) : elle empêche notamment le `push --force` et la suppression de la branche.
+
+## Pipeline CI/CD
+
+Le pipeline est défini dans `.github/workflows/main.yml`. Il se déclenche à chaque push sur `main` ou `develop`, et à chaque pull request.
+
+- **Job `test-backend` (CI)** : récupère le code (`actions/checkout`), installe le JDK 21 (`actions/setup-java`), puis lance `mvn clean verify --file ./backend/simpleapi/pom.xml`, qui compile l'API et exécute les tests unitaires et d'intégration.
+- **Job `build-and-push-docker-image` (CD)** : ne démarre que si les tests réussissent (`needs: test-backend`). Il se connecte à Docker Hub avec les secrets `DOCKERHUB_USERNAME` et `DOCKERHUB_TOKEN`, puis construit les trois images (backend, base de données, httpd) avec `docker/build-push-action`. Les images ne sont publiées que depuis la branche `main` : `push: ${{ github.ref == 'refs/heads/main' }}`.
+
+**Problèmes rencontrés :**
+- La branche s'appelait `master` alors que le workflow vise `main` : elle a été renommée (`git branch -m master main`), puis `main` a été définie comme branche par défaut sur GitHub.
+- Le fichier `SimpleApiApplication.java` était enregistré dans git sous le nom `SimpleapiApplication.java`. Windows ignore la casse, mais pas le runner Linux de GitHub : la compilation échouait. Correction avec `git mv` en passant par un nom intermédiaire.
+- Les secrets Docker Hub étaient vides dans le workflow : ils ont été recréés au bon endroit (*Settings > Secrets and variables > Actions > Repository secrets*).
+
+### Question 2-1 : Que sont les Testcontainers ?
+
+Testcontainers est une bibliothèque Java qui démarre de vrais conteneurs Docker pendant les tests. Dans ce projet, elle lance une base PostgreSQL au début des tests d'intégration, puis la supprime à la fin. On teste ainsi l'application contre une vraie base de données, identique à celle de production, sans rien installer sur la machine : Docker suffit. L'URL `jdbc:tc:postgresql://...` de `src/test/resources/application.yml` déclenche ce mécanisme.
+
+### Question 2-2 : Pourquoi utiliser des variables sécurisées ?
+
+Le fichier `main.yml` est versionné dans le dépôt, qui peut être public. Écrire le mot de passe Docker Hub dedans le rendrait lisible par tous. Les secrets GitHub sont chiffrés, ne sont plus lisibles une fois enregistrés, et sont masqués (`***`) dans les logs. Le pipeline peut donc s'authentifier sans que les identifiants n'apparaissent jamais dans le code ni dans les logs.
+
+### Question 2-3 : Pourquoi `needs: test-backend` sur le job Docker ?
+
+Par défaut, les jobs d'un workflow s'exécutent en parallèle. Sans `needs`, les images seraient construites et publiées en même temps que les tests, donc même si ces tests échouent. Avec `needs: test-backend`, le job Docker attend la fin des tests et n'est exécuté que s'ils réussissent : on ne publie jamais une image dont le code ne passe pas les tests.
+
+### Question 2-4 : Pourquoi pousser les images Docker ?
+
+Publier les images sur Docker Hub en fait des livrables prêts à être déployés. N'importe quel serveur ou membre de l'équipe peut les récupérer avec `docker pull`, sans recompiler le code, et tout le monde utilise exactement la même version. C'est le principe de la livraison continue : chaque modification validée par les tests produit automatiquement une version déployable. Ce sont d'ailleurs ces images qu'Ansible déploie sur le serveur au TP 3.
+
+---
+
+# TP 3 – Ansible
+
+## Mise en place
+
+Ansible n'étant pas disponible sous Windows, il est utilisé dans WSL (Ubuntu) : `sudo apt install ansible`.
+
+La clé privée fournie par l'enseignant est copiée dans `~/.ssh` côté Ubuntu, avec des droits restreints (`chmod 400`), car SSH refuse une clé lisible par d'autres utilisateurs. Elle n'est jamais placée dans le dépôt git.
+
+```bash
+ssh -i ~/.ssh/takima_key admin@<serveur>
+ansible all -m ping --private-key=~/.ssh/takima_key -u admin
+```
+
+Le module `ping` répond `pong` : le serveur est joignable, l'utilisateur `admin` existe et l'authentification SSH fonctionne. Sans l'option `-u admin` ni la clé, Ansible ne peut pas s'authentifier et la commande échoue.
+
+Installation d'Apache en commandes ad hoc :
+
+```bash
+ansible all -m apt -a "name=apache2 state=present" --private-key=~/.ssh/takima_key -u admin --become
+ansible all -m shell -a 'echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html' --private-key=~/.ssh/takima_key -u admin --become
+ansible all -m service -a "name=apache2 state=started" --private-key=~/.ssh/takima_key -u admin --become
+```
+
+Sans `--become`, l'installation échoue : installer un paquet demande les droits administrateur, qu'Ansible obtient via `sudo`.
+
+### Question 3-1 : Documenter l'inventaire et les commandes de base
+
+**Inventaire** (`ansible/inventories/setup.yml`) :
+
+```yaml
+all:
+  vars:
+    ansible_user: admin
+    ansible_ssh_private_key_file: ~/.ssh/takima_key
+  children:
+    prod:
+      hosts: <serveur>
+```
+
+- `all` regroupe tous les serveurs de l'inventaire.
+- `vars` définit des variables appliquées à tous les serveurs : l'utilisateur de connexion (`admin`, l'utilisateur par défaut des serveurs Debian) et le chemin de la clé SSH privée. Il n'est plus nécessaire de les passer à chaque commande.
+- `children` organise les serveurs en groupes ; le groupe `prod` contient notre serveur. On pourrait ajouter d'autres groupes (bases de données, proxys…) et cibler chacun séparément.
+
+Le fichier ne contient que le chemin de la clé, pas la clé elle-même : il peut être versionné sans risque.
+
+**Commandes de base :**
+
+| Commande | Rôle |
+|---|---|
+| `ansible all -i inventories/setup.yml -m ping` | Vérifie la connexion et l'authentification sur tous les serveurs |
+| `ansible all -i inventories/setup.yml -m setup -a "filter=ansible_distribution*"` | Récupère des *facts* : des informations découvertes sur le serveur, ici sa distribution (Debian) et sa version |
+| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | Désinstalle Apache. Relancer la commande ne change rien : Apache est déjà absent |
+
+Ansible est **déclaratif et idempotent** : on décrit l'état voulu (`state: present` ou `absent`), et Ansible n'agit que si le serveur n'est pas déjà dans cet état. La première exécution affiche `CHANGED`, les suivantes `SUCCESS` sans changement.
+
+### Question 3-2 : Documenter le playbook
+
+**`ansible/playbook.yml`** :
+
+```yaml
+- hosts: all
+  gather_facts: true
+  become: true
+
+  roles:
+    - docker
+```
+
+- `hosts: all` : le playbook s'applique à tous les serveurs de l'inventaire.
+- `gather_facts: true` : Ansible collecte les facts du serveur, dont la version de Debian, utilisée pour choisir le bon dépôt Docker.
+- `become: true` : les tâches s'exécutent en administrateur.
+- `roles` : la liste des rôles à appliquer.
+
+Le playbook se vérifie avec `ansible-playbook -i inventories/setup.yml playbook.yml --syntax-check`, puis s'exécute sans cette option.
+
+**Le rôle `docker`** a été créé avec `ansible-galaxy init roles/docker`. Seuls les dossiers utiles ont été conservés : `tasks` (les tâches) et `handlers`. Ses tâches (`roles/docker/tasks/main.yml`) installent Docker en suivant la documentation officielle :
+
+1. installation des paquets prérequis (`apt`) ;
+2. ajout de la clé GPG de Docker (`get_url`), qui permet de vérifier l'authenticité des paquets ;
+3. ajout du dépôt officiel Docker (`apt_repository`), adapté à la version de Debian grâce au fact `distribution_release` ;
+4. installation de `docker-ce` (`apt`) ;
+5. installation du SDK Docker pour Python dans un environnement virtuel (`pip`), nécessaire aux modules Ansible `docker_container` et `docker_network` ;
+6. démarrage du service Docker et activation au démarrage du serveur (`service`).
+
+**Écarts par rapport au modèle de l'énoncé :**
+- le module `apt_key` est déprécié sous Debian 12 ; la clé est téléchargée avec `get_url` dans `/etc/apt/keyrings`, et référencée par `signed-by` dans le dépôt, comme le recommande la documentation de Docker ;
+- la commande `pip install docker` était exécutée à chaque lancement du playbook ; le module `pip` avec l'option `virtualenv` la rend idempotente.
+
+Relancer le playbook n'affiche que des tâches `ok` : Docker est déjà installé, rien n'est modifié. Ranger l'installation dans un rôle la rend réutilisable et garde le playbook court et lisible.
+
+Vérification sur le serveur :
+
+```bash
+ansible all -i inventories/setup.yml -m command -a "docker --version" --become
+ansible all -i inventories/setup.yml -m command -a "systemctl is-active docker" --become
+```
+
+### Question 3-3 : Documenter la configuration des tâches docker_container
+
+<!-- À COMPLÉTER après le déploiement de l'application -->
+
+### Déploiement continu : est-il sûr de déployer automatiquement chaque nouvelle image ?
+
+<!-- À COMPLÉTER -->
