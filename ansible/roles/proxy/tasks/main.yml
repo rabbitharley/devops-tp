@@ -14,3 +14,4 @@
       BACKEND_HOST: "{{ backend_host }}"
       BACKEND_PORT: "{{ backend_port }}"
       HTTPD_PORT: "{{ httpd_port }}"
+      FRONT_HOST: "{{ front_host }}"

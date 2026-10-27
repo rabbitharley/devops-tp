@@ -11,8 +11,9 @@
   become: true
   vars:
     ansible_python_interpreter: /opt/docker_venv/bin/python
-  roles:
+    roles:
     - network
     - database
     - app
+    - front
     - proxy

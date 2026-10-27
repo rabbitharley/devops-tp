@@ -72,7 +72,14 @@ jobs:
           context: ./http-server
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-httpd:latest
           push: ${{ github.ref == 'refs/heads/main' }}
-
+      # Image du front-end (Vue.js servi par nginx)
+      - name: Build image and push front
+        uses: docker/build-push-action@v6
+        with:
+          context: ./front
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-front:latest
+          push: ${{ github.ref == 'refs/heads/main' }}
+          
   # Job 3 : déployer l'application sur le serveur avec Ansible
   deploy:
     # Seulement après la publication des images, et seulement depuis main
@@ -102,3 +109,5 @@ jobs:
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
         run: ansible-playbook -i inventories/setup.yml playbook.yml -e "db_password=${{ secrets.DB_PASSWORD }}"
+ 
+

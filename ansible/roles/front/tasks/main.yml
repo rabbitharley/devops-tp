@@ -1,0 +1,10 @@
+# Front-end Vue.js, servi par nginx ; accessible seulement via le proxy
+- name: Launch front-end
+  community.docker.docker_container:
+    name: "{{ front_host }}"
+    image: "{{ docker_user }}/tp-devops-front:latest"
+    pull: true
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_network }}"

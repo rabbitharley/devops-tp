@@ -14,3 +14,4 @@ db_user: usr
 backend_host: backend
 backend_port: "8080"
 httpd_port: "80"
+front_host: front
