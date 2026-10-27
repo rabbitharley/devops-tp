@@ -1,0 +1,17 @@
+# Base PostgreSQL, à partir de l'image publiée sur Docker Hub
+- name: Launch database
+  community.docker.docker_container:
+    name: "{{ db_host }}"
+    image: "{{ docker_user }}/tp-devops-database:latest"
+    pull: true
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_network }}"
+    env:
+      POSTGRES_DB: "{{ db_name }}"
+      POSTGRES_USER: "{{ db_user }}"
+      POSTGRES_PASSWORD: "{{ db_password }}"
+    # Volume nommé : les données survivent à la recréation du conteneur
+    volumes:
+      - db-data:/var/lib/postgresql/data

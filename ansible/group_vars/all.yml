@@ -1,0 +1,16 @@
+# Compte Docker Hub qui héberge les images publiées par la CI
+docker_user: whitewale002
+
+# Réseau commun aux trois conteneurs
+docker_network: app-network
+
+# Base de données (le mot de passe est passé à part, voir plus bas)
+db_host: database
+db_port: "5432"
+db_name: db
+db_user: usr
+
+# Backend et proxy
+backend_host: backend
+backend_port: "8080"
+httpd_port: "80"

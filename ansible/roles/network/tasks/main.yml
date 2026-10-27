@@ -1,0 +1,5 @@
+# Réseau Docker privé : les conteneurs s'y joignent par leur nom
+- name: Create the application network
+  community.docker.docker_network:
+    name: "{{ docker_network }}"
+    state: present

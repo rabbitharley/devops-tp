@@ -72,3 +72,33 @@ jobs:
           context: ./http-server
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-httpd:latest
           push: ${{ github.ref == 'refs/heads/main' }}
+
+  # Job 3 : déployer l'application sur le serveur avec Ansible
+  deploy:
+    # Seulement après la publication des images, et seulement depuis main
+    needs: build-and-push-docker-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      # Récupère le code, dont le dossier ansible
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Installe Ansible, avec la collection community.docker
+      - name: Install Ansible
+        run: pipx install --force --include-deps ansible
+
+      # Écrit la clé SSH depuis le secret, au chemin indiqué dans l'inventaire
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/takima_key
+          chmod 400 ~/.ssh/takima_key
+
+      # Lance le playbook ; le mot de passe de la base vient des secrets
+      # ANSIBLE_HOST_KEY_CHECKING évite la question "yes/no" à la première connexion
+      - name: Deploy with Ansible
+        working-directory: ./ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: ansible-playbook -i inventories/setup.yml playbook.yml -e "db_password=${{ secrets.DB_PASSWORD }}"

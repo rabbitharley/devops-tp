@@ -1,0 +1,16 @@
+# Apache en reverse proxy : seul conteneur exposé à l'extérieur
+- name: Launch HTTPD proxy
+  community.docker.docker_container:
+    name: httpd
+    image: "{{ docker_user }}/tp-devops-httpd:latest"
+    pull: true
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_network }}"
+    ports:
+      - "80:{{ httpd_port }}"
+    env:
+      BACKEND_HOST: "{{ backend_host }}"
+      BACKEND_PORT: "{{ backend_port }}"
+      HTTPD_PORT: "{{ httpd_port }}"

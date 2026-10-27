@@ -1,0 +1,17 @@
+# API Spring Boot ; ses variables remplissent les ${...} de application.yml
+- name: Launch backend API
+  community.docker.docker_container:
+    name: "{{ backend_host }}"
+    image: "{{ docker_user }}/tp-devops-simple-api:latest"
+    pull: true
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_network }}"
+    env:
+      DB_HOST: "{{ db_host }}"
+      DB_PORT: "{{ db_port }}"
+      DB_NAME: "{{ db_name }}"
+      DB_USER: "{{ db_user }}"
+      DB_PASSWORD: "{{ db_password }}"
+      BACKEND_PORT: "{{ backend_port }}"
