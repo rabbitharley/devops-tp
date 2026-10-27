@@ -1,66 +1,59 @@
-# TP DevOps – Partie 01 : Docker
+# Rapport DevOps
 
-## Structure du projet
+Ce rapport présente ce que j'ai appris et compris au cours des trois TP, ainsi que mes réponses aux questions posées. Le fil conducteur est une application 3-tiers (base de données PostgreSQL, API Spring Boot, serveur HTTP Apache), que j'ai successivement :
 
-Un dossier par image Docker :
-
-```
-devops-tp/
-├── flask-app/              # TD : application Flask de découverte
-├── database/               # Base de données PostgreSQL
-│   ├── Dockerfile
-│   └── sql/
-│       ├── 01-CreateScheme.sql
-│       └── 02-InsertData.sql
-├── backend/
-│   ├── hello-world/        # Hello World Java (simple puis multistage)
-│   │   ├── Dockerfile
-│   │   └── Main.java
-│   └── simpleapi/          # API Spring Boot connectée à la base
-│       ├── Dockerfile
-│       ├── pom.xml
-│       └── src/
-├── http-server/            # Serveur HTTP Apache (reverse proxy)
-│   ├── Dockerfile
-│   ├── httpd.conf
-│   └── index.html
-├── docker-compose.yml      # Orchestration des trois services
-├── .env                    # Mot de passe de la base (exclu de git)
-└── README.md               # Ce rapport
-```
+1. **conteneurisée** avec Docker et orchestrée avec docker-compose (TP 1) ;
+2. **testée et publiée automatiquement** avec GitHub Actions (TP 2) ;
+3. **déployée automatiquement** sur un serveur distant avec Ansible, avec un front-end et des secrets chiffrés (TP 3).
 
 **Architecture finale :**
 
 ```
-Navigateur ──► httpd (Apache, port 8081) ──► backend (Spring Boot, 8080) ──► database (PostgreSQL, 5432)
-                    front-network                       back-network
+                                    ┌──► front    (Vue.js + nginx)
+Navigateur ──► httpd (Apache, 80) ──┤
+                                    └──► backend  (Spring Boot, 8080) ──► database (PostgreSQL, 5432)
+
+   /      → front
+   /api/  → backend
 ```
 
-Seul Apache est accessible depuis l'hôte ; le backend et la base ne sont joignables qu'à l'intérieur des réseaux Docker.
+Seul Apache est accessible depuis l'extérieur. Un push sur `main` déclenche toute la chaîne : **tests → publication des images sur Docker Hub → déploiement sur le serveur**.
+
+**Organisation du dépôt** (un dossier par image) :
+
+```
+devops-tp/
+├── .github/workflows/main.yml   # pipeline CI/CD
+├── ansible/                     # inventaire, rôles, playbook, secrets chiffrés
+├── backend/simpleapi/           # API Spring Boot
+├── database/                    # PostgreSQL et scripts SQL d'initialisation
+├── front/                       # front-end Vue.js
+├── http-server/                 # Apache, reverse proxy
+├── docker-compose.yml           # exécution en local
+└── .env.example                 # modèle de configuration (le vrai .env n'est pas versionné)
+```
 
 ---
 
-## 0. TD – Découverte de Docker (application Flask)
+# TP 1 – Docker
 
-Application Python Flask affichant un GIF de chat aléatoire, conteneurisée à partir de l'image `alpine:3.21.0`.
+## Ce que j'ai compris de Docker
 
-```bash
-docker build -t bunny/myfirstapp .
-docker run -p 8888:5000 --name myfirstapp bunny/myfirstapp
-```
+**Image et conteneur.** Une image est un modèle figé, en lecture seule, construit à partir d'un `Dockerfile`. Un conteneur est une instance de cette image en cours d'exécution. Une même image peut donner plusieurs conteneurs. Contrairement à une machine virtuelle, un conteneur ne contient pas de système d'exploitation complet : il partage le noyau de la machine hôte, ce qui le rend léger et rapide à démarrer.
 
-L'application est accessible sur http://localhost:8888.
+**Le conteneur est éphémère.** Un conteneur vit tant que sa commande principale tourne : `docker run alpine /bin/sh` s'arrête immédiatement, car le shell n'a rien à exécuter sans terminal (`-it`). Et quand on supprime un conteneur, tout ce qu'il a écrit disparaît. Cette idée explique à elle seule l'usage des volumes, des variables d'environnement et des images reconstruites.
 
-**Remarques :**
-- Les noms d'images Docker doivent être en **minuscules** : `Bunny/myfirstapp` est interprété comme un nom de serveur de registre et provoque une erreur.
-- `docker run` crée un nouveau conteneur, `docker start` relance un conteneur existant.
-- Problème rencontré : les conteneurs n'avaient pas accès à Internet pendant le build (`apk add` échouait). <!-- À COMPLÉTER : expliquer ce qui a résolu le problème (DNS, VPN, antivirus...) -->
+**Les couches et le cache.** Chaque instruction d'un Dockerfile crée une couche, mise en cache. C'est pourquoi on copie la liste des dépendances (`requirements.txt`, `pom.xml`) **avant** le code : tant qu'elle ne change pas, les dépendances ne sont pas réinstallées à chaque modification du code.
 
----
+**Build et exécution sont deux moments distincts.** `RUN` s'exécute pendant la construction de l'image, `CMD` ou `ENTRYPOINT` au démarrage du conteneur. Conséquence concrète : quand j'ai modifié la configuration de l'API, il a fallu **reconstruire l'image**, car le fichier était copié dans l'image au moment du build.
+
+**Quelques pièges rencontrés :**
+- les noms d'images doivent être en minuscules : `Bunny/myfirstapp` est interprété comme l'adresse d'un registre ;
+- `docker run` crée un **nouveau** conteneur, alors que `docker start` relance un conteneur existant ;
+- `EXPOSE` ne fait que documenter un port : c'est `-p hôte:conteneur` qui le rend accessible ;
+- quand un build échouait faute d'accès à Internet, j'ai appris à diagnostiquer couche par couche : tester depuis Windows, puis la résolution DNS depuis un conteneur, puis la connexion elle-même.
 
 ## 1. Base de données
-
-### Dockerfile
 
 ```dockerfile
 FROM postgres:17.2-alpine
@@ -71,144 +64,49 @@ ENV POSTGRES_DB=db \
 COPY sql/ /docker-entrypoint-initdb.d/
 ```
 
-- `FROM postgres:17.2-alpine` : image officielle PostgreSQL basée sur Alpine (légère).
-- `ENV` : nom de la base et de l'utilisateur. Le mot de passe n'est volontairement **pas** défini ici (voir question 1-1).
-- `COPY sql/ /docker-entrypoint-initdb.d/` : les scripts SQL de ce dossier sont exécutés automatiquement, par ordre alphabétique, au premier démarrage du conteneur. Les préfixes `01-` et `02-` garantissent que les tables sont créées avant l'insertion des données.
-
-### Commandes
+L'image officielle PostgreSQL exécute automatiquement, au **premier** démarrage, les scripts placés dans `/docker-entrypoint-initdb.d`, par ordre alphabétique. Les préfixes `01-CreateScheme.sql` et `02-InsertData.sql` garantissent que les tables existent avant l'insertion des données. Ces scripts ne sont rejoués que si le volume de données est vide.
 
 ```bash
-# Réseau privé permettant aux conteneurs de communiquer par leur nom
 docker network create app-network
-
-# Construction de l'image
-docker build -t bunny/database .
-
-# Lancement de la base
+docker build -t <utilisateur>/database .
 docker run -d --name database --network app-network \
   -e POSTGRES_PASSWORD=pwd \
   -v pgdata:/var/lib/postgresql/data \
-  bunny/database
-
-# Interface web Adminer pour consulter la base
+  <utilisateur>/database
 docker run -d -p 8090:8080 --network app-network --name adminer adminer
 ```
 
-| Option | Rôle |
-|---|---|
-| `-d` | Lance le conteneur en arrière-plan |
-| `--name database` | Nomme le conteneur ; ce nom sert aussi d'adresse sur le réseau |
-| `--network app-network` | Connecte le conteneur au réseau privé partagé avec Adminer (et plus tard le backend) |
-| `-e POSTGRES_PASSWORD=pwd` | Passe le mot de passe au lancement, hors de l'image |
-| `-v pgdata:/var/lib/postgresql/data` | Stocke les données dans un volume nommé, indépendant du conteneur |
-| `-p 8090:8080` | Publie le port d'Adminer sur la machine hôte |
+Sur un réseau Docker, les conteneurs se joignent **par leur nom** : Adminer se connecte au serveur `database`. La base n'a pas d'option `-p` : elle n'a besoin d'être accessible que depuis le réseau Docker.
 
-La base n'a **pas** de `-p` : elle n'a pas besoin d'être accessible depuis l'hôte, seulement depuis le réseau Docker.
+### Question 1-1 : Pourquoi passer les variables d'environnement avec `-e` plutôt que dans le Dockerfile ?
 
-Connexion dans Adminer (http://localhost:8090) : système PostgreSQL, serveur `database`, utilisateur `usr`, base `db`.
+Le Dockerfile est versionné dans git, et l'image peut être publiée. Une valeur écrite dans le Dockerfile devient donc lisible par n'importe qui ayant accès au dépôt ou à l'image, par exemple avec `docker inspect` ou `docker history`. En passant le mot de passe avec `-e` au lancement, le secret n'est stocké ni dans l'image ni dans le code. Cela permet aussi d'utiliser **la même image** avec des valeurs différentes selon l'environnement (développement, test, production).
 
-### Vérifications
+### Question 1-2 : Pourquoi attacher un volume au conteneur PostgreSQL ?
 
-- `docker logs database` montre l'exécution des scripts `01-CreateScheme.sql` et `02-InsertData.sql`.
-- Les tables `departments` et `students` et leurs données sont visibles dans Adminer.
-- **Persistance** : après avoir ajouté une ligne, supprimé le conteneur (`docker rm -f database`) puis relancé la même commande `docker run`, la ligne est toujours présente.
+Un conteneur est éphémère : s'il est supprimé, les données de la base disparaissent avec lui. Le volume stocke le dossier `/var/lib/postgresql/data` **en dehors du conteneur**. Je l'ai vérifié en ajoutant une ligne dans la base, en supprimant le conteneur puis en le recréant : la ligne était toujours là.
 
-**Point d'attention :** les scripts d'initialisation ne s'exécutent que si le volume est vide. Pour les rejouer, il faut supprimer le volume (`docker volume rm pgdata`).
+### Question 1-3 : Éléments essentiels du conteneur de base de données
 
-### Questions
+- **Image** : `postgres:17.2-alpine`, officielle et légère ;
+- **Initialisation** : scripts SQL copiés dans `/docker-entrypoint-initdb.d` ;
+- **Configuration** : nom de la base et utilisateur dans le Dockerfile, mot de passe passé au lancement (`-e`) ;
+- **Persistance** : volume nommé monté sur `/var/lib/postgresql/data` ;
+- **Réseau** : `app-network`, sur lequel le conteneur est joignable sous le nom `database` ;
+- **Exposition** : aucun port publié vers l'hôte.
 
-**1-1. Pourquoi est-il préférable de passer les variables d'environnement avec `-e` plutôt que de les écrire dans le Dockerfile ?**
+## 2. Backend : le build multistage
 
-Le Dockerfile est versionné dans git et l'image peut être publiée : toute valeur écrite dedans devient lisible par n'importe qui ayant accès au dépôt ou à l'image (par exemple via `docker inspect` ou `docker history`). En passant le mot de passe avec `-e` au lancement, le secret n'est jamais stocké dans l'image ni dans le code source. Cela permet aussi d'utiliser la même image avec des valeurs différentes selon l'environnement (développement, test, production).
-
-**1-2. Pourquoi faut-il attacher un volume au conteneur PostgreSQL ?**
-
-Un conteneur est éphémère : lorsqu'il est supprimé, tout ce qui a été écrit dans son système de fichiers disparaît avec lui. Sans volume, chaque recréation du conteneur repartirait d'une base vide. Le volume stocke les fichiers de la base (`/var/lib/postgresql/data`) en dehors du conteneur, sur l'hôte : les données survivent à la suppression et à la recréation du conteneur, ainsi qu'aux mises à jour de l'image.
-
-**1-3. Éléments essentiels du conteneur de base de données**
-
-Voir le Dockerfile et les commandes ci-dessus.
-
----
-
-## 2. Backend API
-
-### 2.1 Hello World Java
-
-Un simple programme Java (`Main.java`) affichant « Hello World! ».
-
-Pour exécuter du code Java déjà compilé, un **JRE** (environnement d'exécution) suffit : l'image `eclipse-temurin:21-jre-alpine` a été choisie car elle est légère et ne contient pas les outils de compilation.
-
-**Première version : compilation sur la machine hôte**
-
-Plutôt que d'installer un JDK sur le PC, la compilation a été faite dans un conteneur temporaire :
-
-```bash
-docker run --rm -v "${PWD}:/app" -w /app eclipse-temurin:21-jdk-alpine javac Main.java
-```
-
-- `-v "${PWD}:/app"` : partage le dossier courant avec le conteneur.
-- `-w /app` : définit ce dossier comme répertoire de travail.
-- `--rm` : supprime le conteneur à la fin de la compilation.
-
-Le fichier `Main.class` produit est ensuite copié dans l'image :
-
-```dockerfile
-FROM eclipse-temurin:21-jre-alpine
-WORKDIR /app
-COPY Main.class .
-CMD ["java", "Main"]
-```
-
-```bash
-docker build -t bunny/hello-java .
-docker run --rm bunny/hello-java
-# Hello World!
-```
-
-### 2.2 Build multistage
-
-La compilation est maintenant réalisée par Docker lui-même, en deux étapes :
-
-```dockerfile
-# Étape 1 : compilation avec le JDK
-FROM eclipse-temurin:21-jdk-alpine AS build
-WORKDIR /usr/src
-COPY Main.java .
-RUN javac Main.java
-
-# Étape 2 : exécution avec le JRE seulement
-FROM eclipse-temurin:21-jre-alpine
-WORKDIR /app
-COPY --from=build /usr/src/Main.class .
-CMD ["java", "Main"]
-```
-
-- La première étape, nommée `build`, utilise le JDK pour compiler `Main.java`.
-- La seconde repart d'une image JRE vierge et ne récupère que `Main.class` grâce à `COPY --from=build`.
-- Seule la dernière étape constitue l'image finale : le JDK n'y est pas inclus.
-
-Vérification : après suppression de `Main.class` sur la machine hôte, le build réussit et le conteneur affiche toujours « Hello World! », ce qui prouve que la compilation a bien eu lieu dans Docker.
-
-### 2.3 API Spring Boot
-
-Projet généré sur https://start.spring.io : Maven, Java 21, packaging Jar, dépendance **Spring Web**, groupe `fr.takima.training`, artefact `simpleapi`.
-
-**Remarque :** la version 3.4.5 de Spring Boot demandée par l'énoncé n'est plus proposée par Spring Initializr. La version stable **4.1.1** a été utilisée à la place (les versions `SNAPSHOT` et `M2` sont des préversions, à éviter).
-
-Un contrôleur `GreetingController` expose un endpoint `/` qui renvoie un message de bienvenue et un compteur d'appels.
+Pour exécuter du Java, un JRE suffit ; pour le compiler, il faut un JDK et Maven. Je l'ai d'abord vérifié avec un simple Hello World compilé dans un conteneur temporaire, puis exécuté avec une image JRE. J'ai ensuite confié la compilation à Docker lui-même :
 
 ```dockerfile
 # Build stage
 FROM eclipse-temurin:21-jdk-alpine AS myapp-build
 ENV MYAPP_HOME=/opt/myapp
 WORKDIR $MYAPP_HOME
-
 RUN apk add --no-cache maven
-
 COPY pom.xml .
 RUN mvn dependency:go-offline
-
 COPY src ./src
 RUN mvn package -DskipTests
 
@@ -217,232 +115,69 @@ FROM eclipse-temurin:21-jre-alpine
 ENV MYAPP_HOME=/opt/myapp
 WORKDIR $MYAPP_HOME
 COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar
-
 ENTRYPOINT ["java", "-jar", "myapp.jar"]
 ```
 
-```bash
-docker build -t bunny/simple-api .
-docker run -d -p 8080:8080 --name simple-api bunny/simple-api
+L'API fournie par l'enseignant se connecte à la base. Dans `application.yml`, l'adresse de la base est `database` et non `localhost` : à l'intérieur d'un conteneur, `localhost` désigne le conteneur lui-même. Toutes les valeurs de connexion sont lues dans des variables d'environnement (`${DB_HOST}`, `${DB_PASSWORD}`…), pour ne rien écrire en dur.
+
+### Question 1-4 : Pourquoi un build multistage ? Explication de chaque étape
+
+**Pourquoi :** compiler demande un JDK et Maven, exécuter ne demande qu'un JRE. Le multistage compile dans une première image, puis ne garde que le résultat dans une seconde. L'image finale est ainsi :
+- **plus légère** : ni JDK, ni Maven, ni code source, ni dépendances de compilation ;
+- **plus sûre** : moins d'outils en production, donc moins de failles possibles ;
+- **reproductible** : il n'est pas nécessaire d'installer Java sur sa machine, Docker suffit.
+
+**Les étapes :**
+- `FROM ...jdk-alpine AS myapp-build` : première étape, avec le JDK 21, nommée pour pouvoir y faire référence ;
+- `ENV` et `WORKDIR` : définissent et créent le dossier de travail `/opt/myapp` ;
+- `RUN apk add maven` : installe l'outil de build ;
+- `COPY pom.xml` puis `RUN mvn dependency:go-offline` : télécharge les dépendances dans une couche qui reste en cache tant que le `pom.xml` ne change pas (ajout par rapport à l'énoncé) ;
+- `COPY src` puis `RUN mvn package -DskipTests` : compile et produit le `.jar` ;
+- `FROM ...jre-alpine` : seconde étape, qui repart d'une image vierge avec seulement le JRE ;
+- `COPY --from=myapp-build` : récupère uniquement le `.jar` de la première étape ;
+- `ENTRYPOINT` : lance l'application au démarrage du conteneur.
+
+## 3. Serveur HTTP et reverse proxy
+
+J'ai d'abord servi une page statique avec l'image `httpd:2.4-alpine`, puis récupéré sa configuration par défaut avec `docker cp`. Pour en faire un reverse proxy, j'ai activé les modules `proxy` et `proxy_http`, puis ajouté une redirection vers le backend :
+
+```apache
+<VirtualHost *:80>
+ProxyPreserveHost On
+ProxyPass / http://backend:8080/
+ProxyPassReverse / http://backend:8080/
+</VirtualHost>
 ```
 
-- http://localhost:8080/ renvoie `{"id":1,"content":"Hello, World!"}`
-- http://localhost:8080/?name=Bunny renvoie `{"id":2,"content":"Hello, Bunny!"}`
-
-### Question 1-4 : Pourquoi un build multistage ? Explication de chaque étape du Dockerfile
-
-**Pourquoi un build multistage ?**
-
-Compiler une application Java nécessite un JDK et Maven, mais l'exécuter ne nécessite qu'un JRE. Le build multistage sépare ces deux besoins :
-
-- **Image finale plus légère** : elle ne contient que le JRE et le `.jar`. Le JDK, Maven, le code source et les bibliothèques téléchargées pour la compilation restent dans l'étape de build et ne sont pas inclus.
-- **Plus sécurisée** : moins d'outils présents en production, donc une surface d'attaque réduite.
-- **Build reproductible** : il n'est pas nécessaire d'installer Java ou Maven sur sa machine. Docker suffit, et tout le monde compile avec les mêmes versions.
-- **Un seul fichier** décrit à la fois la compilation et l'exécution.
-
-**Explication de chaque étape :**
-
-*Étape de build :*
-- `FROM eclipse-temurin:21-jdk-alpine AS myapp-build` : part d'une image contenant le JDK 21, et nomme cette étape `myapp-build` pour pouvoir y faire référence plus tard.
-- `ENV MYAPP_HOME=/opt/myapp` : définit une variable contenant le chemin de l'application.
-- `WORKDIR $MYAPP_HOME` : se place dans ce dossier (créé s'il n'existe pas).
-- `RUN apk add --no-cache maven` : installe Maven, l'outil de build Java.
-- `COPY pom.xml .` : copie le fichier de configuration Maven, qui liste les dépendances.
-- `RUN mvn dependency:go-offline` *(ajouté par rapport à l'énoncé)* : télécharge toutes les dépendances. Comme cette instruction ne dépend que du `pom.xml`, Docker la garde en cache tant que ce fichier ne change pas : modifier le code ne relance pas le téléchargement.
-- `COPY src ./src` : copie le code source.
-- `RUN mvn package -DskipTests` : compile le code et produit le fichier `.jar` dans `target/`, sans exécuter les tests.
-
-*Étape d'exécution :*
-- `FROM eclipse-temurin:21-jre-alpine` : repart d'une image neuve ne contenant que le JRE. Tout ce qui précède est abandonné.
-- `ENV` et `WORKDIR` : recréent le dossier de l'application dans cette nouvelle image.
-- `COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar` : récupère uniquement le `.jar` produit à l'étape de build et le renomme `myapp.jar`.
-- `ENTRYPOINT ["java", "-jar", "myapp.jar"]` : commande lancée au démarrage du conteneur, qui exécute l'application.
-
-### 2.4 Backend API connectée à la base de données
-
-Le dossier `src` et le fichier `pom.xml` ont été remplacés par ceux du dépôt fourni (https://github.com/takima-training/simple-api-student), qui utilise Spring Boot 3.4.2. Le Dockerfile multistage est resté identique.
-
-**Configuration** (`src/main/resources/application.yml`, section `datasource`) :
-
-```yaml
-  datasource:
-    url: jdbc:postgresql://database:5432/db
-    username: usr
-    password: ${DB_PASSWORD}
-    driver-class-name: org.postgresql.Driver
-```
-
-- **Accès au conteneur de base de données** : les deux conteneurs sont sur le réseau `app-network`, où chaque conteneur est joignable par son nom. L'URL utilise donc `database` (le nom du conteneur) et non `localhost`, qui désignerait le conteneur backend lui-même. Le réseau Docker remplace l'option `--link`, dépréciée.
-- **Mot de passe** : `${DB_PASSWORD}` est lu dans une variable d'environnement passée au lancement avec `-e`, pour ne pas l'écrire dans le code (même logique que la question 1-1).
-
-**Commandes :**
-
-```bash
-docker build -t bunny/simple-api .
-docker run -d --name simple-api --network app-network -e DB_PASSWORD=pwd -p 8080:8080 bunny/simple-api
-```
-
-**Vérification :** les logs (`docker logs simple-api`) montrent la connexion à PostgreSQL 17.2, puis `Started SimpleApiApplication`. L'endpoint http://localhost:8080/departments/IRC/students renvoie l'étudiant Eli Copter du département IRC.
-
-**Endpoints disponibles :**
-
-| Méthode | URL | Rôle |
-|---|---|---|
-| GET | `/departments` | Liste des départements |
-| GET | `/departments/{nom}` | Un département |
-| GET | `/departments/{nom}/students` | Étudiants d'un département |
-| GET | `/departments/{nom}/count` | Nombre d'étudiants d'un département |
-| GET | `/students` | Liste des étudiants |
-| GET | `/students/{id}` | Un étudiant |
-| POST | `/students` | Créer un étudiant |
-| PUT | `/students/{id}` | Modifier un étudiant |
-| DELETE | `/students/{id}` | Supprimer un étudiant |
-
-**Problème rencontré :** au premier lancement, l'application refusait de démarrer (`'url' attribute is not specified`) : la configuration `datasource` n'était pas prise en compte. Après correction de `application.yml`, il a fallu **reconstruire l'image**, car la configuration est intégrée au `.jar` lors du build.
-
----
-
-## 3. Serveur HTTP
-
-### 3.1 Page d'accueil statique
-
-Image de base : `httpd:2.4-alpine`, l'image officielle du serveur Apache, en version Alpine (légère). Le dossier servi par défaut est `/usr/local/apache2/htdocs/`.
-
-```dockerfile
-FROM httpd:2.4-alpine
-COPY index.html /usr/local/apache2/htdocs/
-```
-
-```bash
-docker build -t bunny/http-server .
-docker run -d -p 8081:80 --name http-server --network app-network bunny/http-server
-```
-
-Le port 80 de la machine hôte étant déjà utilisé, le conteneur a été publié sur le port **8081** (http://localhost:8081).
-
-Commandes de vérification :
-- `docker stats` : consommation CPU, mémoire et réseau de chaque conteneur en temps réel ;
-- `docker inspect http-server` : configuration complète du conteneur (image, réseau, ports, variables…) ;
-- `docker logs http-server` : journaux d'Apache, dont les requêtes reçues.
-
-### 3.2 Configuration
-
-La configuration par défaut a été récupérée depuis le conteneur en cours d'exécution :
-
-```bash
-docker cp http-server:/usr/local/apache2/conf/httpd.conf ./httpd.conf
-```
-
-`docker cp` a été préféré à `docker exec ... cat ... > httpd.conf` : sous PowerShell, la redirection `>` enregistre le fichier dans un encodage (UTF-16) qu'Apache ne sait pas lire.
-
-### 3.3 Reverse proxy
-
-Modifications apportées à `httpd.conf` :
-
-1. Activation des modules proxy (suppression du `#` en début de ligne) :
-   ```
-   LoadModule proxy_module modules/mod_proxy.so
-   LoadModule proxy_http_module modules/mod_proxy_http.so
-   ```
-2. Ajout d'un hôte virtuel qui transmet toutes les requêtes au backend :
-   ```
-   <VirtualHost *:80>
-   ProxyPreserveHost On
-   ProxyPass / http://simple-api:8080/
-   ProxyPassReverse / http://simple-api:8080/
-   </VirtualHost>
-   ```
-
-- `ProxyPass` : transmet les requêtes reçues sur `/` au backend. `simple-api` est le nom du conteneur backend, joignable par ce nom sur le réseau `app-network`.
-- `ProxyPassReverse` : réécrit les en-têtes des réponses du backend (redirections) pour qu'ils pointent vers le proxy et non vers le backend.
-- `ProxyPreserveHost On` : conserve le nom d'hôte demandé par le client lors de la transmission.
-
-La configuration modifiée est copiée dans l'image :
-
-```dockerfile
-FROM httpd:2.4-alpine
-COPY index.html /usr/local/apache2/htdocs/
-COPY httpd.conf /usr/local/apache2/conf/httpd.conf
-```
-
-**Vérification :** http://localhost:8081/departments/IRC/students renvoie l'étudiant Eli Copter : la requête arrive sur Apache, qui la transmet au backend, qui interroge la base.
+`ProxyPass` transmet les requêtes au backend ; `ProxyPassReverse` réécrit les en-têtes des réponses pour qu'elles pointent vers le proxy. J'ai aussi utilisé `docker stats`, `docker inspect` et `docker logs` pour observer les conteneurs : les logs d'Apache montrent bien chaque requête qui passe par lui.
 
 ### Question 1-5 : Pourquoi a-t-on besoin d'un reverse proxy ?
 
-Un reverse proxy est un serveur placé devant l'application, qui reçoit toutes les requêtes des clients et les transmet au bon service.
+Le reverse proxy est un **point d'entrée unique** placé devant l'application :
+- seul Apache est exposé ; le backend et la base restent cachés dans le réseau Docker, ce qui réduit la surface d'attaque ;
+- le HTTPS, les journaux et les règles d'accès se gèrent à un seul endroit ;
+- il peut **répartir la charge** entre plusieurs instances du backend ;
+- il permet de servir plusieurs services sous une même adresse. C'est ce que j'ai fait au TP 3 : `/` pour le front, `/api/` pour l'API.
 
-- **Un seul point d'entrée** : seul Apache est exposé à l'extérieur. Le backend et la base de données restent cachés dans le réseau Docker, ce qui réduit la surface d'attaque.
-- **Centralisation** : le HTTPS (certificats SSL), les journaux et les règles d'accès sont gérés à un seul endroit, sans modifier l'application.
-- **Répartition de charge** : le proxy peut distribuer les requêtes entre plusieurs instances du backend.
-- **Plusieurs services sous une même adresse** : il peut servir un front-end et l'API sous le même nom de domaine, en routant selon l'URL.
+## 4. docker-compose
 
----
-
-## 4. Docker Compose
-
-Les trois conteneurs sont désormais décrits dans un seul fichier, `docker-compose.yml`, à la racine du projet. Une seule commande construit les images et démarre toute l'application :
-
-```bash
-docker compose up -d --build
-```
-
-L'API est accessible **uniquement via Apache** : http://localhost:8081/departments/IRC/students. Le port 8080 du backend n'est plus publié.
-
-**Adaptation du reverse proxy :** dans compose, chaque conteneur est joignable par son **nom de service**. Le backend s'appelant `backend`, la configuration Apache a été modifiée :
-
-```
-ProxyPass / http://backend:8080/
-ProxyPassReverse / http://backend:8080/
-```
-
-**Gestion du mot de passe :** il est stocké dans un fichier `.env` à la racine, lu automatiquement par compose, et exclu de git via `.gitignore` :
-
-```
-POSTGRES_PASSWORD=pwd
-```
-
-**Problème rencontré :** au premier lancement, Apache renvoyait une erreur **503 Service Unavailable**, car le backend n'avait pas encore fini de démarrer. Après une connexion échouée, Apache met le backend en pénalité pendant 60 secondes. Une fois le backend démarré, un redémarrage d'Apache (`docker compose restart httpd`) a résolu le problème.
-
-### Question 1-6 : Pourquoi docker-compose est-il si important ?
-
-Sans compose, il faut lancer chaque conteneur à la main, dans le bon ordre, avec de longues commandes `docker run` (réseaux, volumes, variables, ports), et recommencer à chaque modification. C'est long et source d'erreurs.
-
-Docker-compose permet de :
-- **décrire toute l'application dans un seul fichier**, versionné dans git : la configuration devient du code, lisible et reproductible ;
-- **tout démarrer, arrêter ou reconstruire en une commande** ;
-- **gérer l'ordre de démarrage** et les dépendances entre services (`depends_on`) ;
-- **créer automatiquement** les réseaux et les volumes ;
-- **reproduire le même environnement** sur n'importe quelle machine (un collègue, un serveur de test).
-
-### Question 1-7 : Principales commandes docker-compose
-
-| Commande | Rôle |
-|---|---|
-| `docker compose up -d --build` | Construit les images et démarre tous les services en arrière-plan |
-| `docker compose ps` | Affiche l'état des services |
-| `docker compose logs -f <service>` | Affiche et suit les logs d'un service |
-| `docker compose stop` | Arrête les services sans supprimer les conteneurs |
-| `docker compose start` | Redémarre des services arrêtés |
-| `docker compose restart <service>` | Redémarre un service |
-| `docker compose build` | Reconstruit les images |
-| `docker compose down` | Arrête et supprime les conteneurs et les réseaux (les volumes sont conservés) |
-| `docker compose down -v` | Supprime aussi les volumes, donc les données de la base |
-| `docker compose exec <service> sh` | Ouvre un terminal dans un conteneur en cours d'exécution |
-
-### Question 1-8 : Documentation du fichier docker-compose.yml
+docker-compose décrit tous les services dans un seul fichier. J'ai centralisé toute la configuration (noms d'hôtes, ports, mot de passe) dans un fichier `.env`, lu automatiquement par compose et exclu de git. Un modèle `.env.example`, sans le vrai mot de passe, est versionné.
 
 ```yaml
 services:
   database:
     build: ./database
     environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGPORT: ${DB_PORT}
     volumes:
       - db-data:/var/lib/postgresql/data
     networks:
       - back-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U usr -d db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -451,7 +186,12 @@ services:
   backend:
     build: ./backend/simpleapi
     environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKEND_PORT: ${BACKEND_PORT}
     networks:
       - back-network
       - front-network
@@ -460,14 +200,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  front:
+    build: ./front
+    networks:
+      - front-network
+    restart: unless-stopped
+
   httpd:
     build: ./http-server
+    environment:
+      BACKEND_HOST: ${BACKEND_HOST}
+      BACKEND_PORT: ${BACKEND_PORT}
+      FRONT_HOST: ${FRONT_HOST}
+      HTTPD_PORT: ${HTTPD_PORT}
     ports:
-      - "8081:80"
+      - "${HTTP_PORT}:${HTTPD_PORT}"
     networks:
       - front-network
     depends_on:
       - backend
+      - front
     restart: unless-stopped
 
 networks:
@@ -478,133 +230,175 @@ volumes:
   db-data:
 ```
 
-**Les services :**
-- **`database`** : construit depuis `./database`. Le mot de passe est lu dans `.env`. Les données sont stockées dans le volume `db-data`. Un **healthcheck** (`pg_isready`) vérifie toutes les 5 secondes que PostgreSQL accepte réellement les connexions.
-- **`backend`** : construit depuis `./backend/simpleapi`. Il reçoit le même mot de passe sous le nom `DB_PASSWORD`, attendu par `application.yml`. Grâce à `condition: service_healthy`, il ne démarre que lorsque la base est prête, et pas seulement lancée.
-- **`httpd`** : construit depuis `./http-server`. C'est le **seul service dont un port est publié** (8081 sur l'hôte vers 80 dans le conteneur) : c'est le point d'entrée unique de l'application.
+### Question 1-6 : Pourquoi docker-compose est-il si important ?
 
-**Les choix d'architecture :**
-- **Ségrégation des réseaux** : deux réseaux distincts. `front-network` relie Apache et le backend ; `back-network` relie le backend et la base. Apache ne peut donc pas joindre la base directement : seul le backend fait le lien.
-- **Aucun port exposé pour le backend et la base**, comme demandé : ils ne sont accessibles que depuis les réseaux Docker.
-- **Secrets hors du code** : le mot de passe est dans `.env`, exclu de git.
-- **Politique de redémarrage** `unless-stopped` : un service qui plante redémarre automatiquement, sauf s'il a été arrêté volontairement.
-- **Persistance** : le volume nommé `db-data` conserve les données de la base après un `docker compose down`.
+Sans compose, il faut lancer chaque conteneur à la main, avec de longues commandes `docker run`, dans le bon ordre, et tout recommencer à chaque modification. C'est long et source d'erreurs. Avec compose :
+- toute l'application est décrite dans **un seul fichier versionné** : l'infrastructure devient du code ;
+- **une seule commande** construit, démarre ou arrête l'ensemble ;
+- l'ordre de démarrage et les dépendances sont gérés (`depends_on`) ;
+- les réseaux et volumes sont créés automatiquement ;
+- l'environnement est **reproductible** à l'identique sur n'importe quelle machine.
 
----
+### Question 1-7 : Les commandes docker-compose les plus importantes
+
+| Commande | Rôle |
+|---|---|
+| `docker compose up -d --build` | construit les images et démarre tous les services en arrière-plan |
+| `docker compose ps` | affiche l'état des services |
+| `docker compose logs -f <service>` | suit les logs d'un service |
+| `docker compose restart <service>` | redémarre un service |
+| `docker compose stop` / `start` | arrête ou relance sans supprimer |
+| `docker compose down` | supprime conteneurs et réseaux, en gardant les volumes |
+| `docker compose down -v` | supprime aussi les volumes, donc les données |
+| `docker compose config` | affiche le fichier final, avec les variables du `.env` remplacées |
+
+### Question 1-8 : Documentation du fichier docker-compose
+
+- **`database`** : construite depuis `./database`, configurée par `.env`, avec ses données dans le volume `db-data`. Le **healthcheck** (`pg_isready`) vérifie que PostgreSQL accepte réellement les connexions ; le double `$$` laisse la variable au conteneur au lieu que compose la remplace.
+- **`backend`** : reçoit de quoi joindre la base. `condition: service_healthy` le fait attendre que la base soit **prête**, et pas seulement démarrée : c'est la limite de `depends_on` seul.
+- **`front`** : le front-end, sans port publié.
+- **`httpd`** : le **seul service avec un port publié**, point d'entrée unique de l'application.
+- **Deux réseaux** : `front-network` (Apache, front, backend) et `back-network` (backend, base). Apache ne peut pas joindre la base directement.
+- **`restart: unless-stopped`** : un service qui plante redémarre automatiquement, sauf s'il a été arrêté volontairement.
+- **Aucune valeur en dur** : hôtes, ports et mot de passe viennent du `.env`, et chaque application les lit avec la syntaxe `${...}` (Spring dans `application.yml`, Apache dans `httpd.conf`).
+
+**Problème rencontré :** au premier lancement, Apache renvoyait une erreur 503, car le backend n'avait pas fini de démarrer. J'ai compris qu'après un échec, Apache « met de côté » le backend pendant un moment : un `docker compose restart httpd` a suffi.
 
 ## 5. Publication
 
 ### Question 1-9 : Commandes de publication et images publiées
 
-Les images construites par docker-compose sont nommées d'après le dossier du projet (`devops-tp-database`, `devops-tp-backend`, `devops-tp-httpd`). Pour les publier, il faut leur donner un nom de la forme `utilisateur/image:version`.
-
 ```bash
-# Connexion au compte Docker Hub
 docker login
-
-# Ajout d'un tag avec le nom d'utilisateur et un numéro de version
 docker tag devops-tp-database <utilisateur>/tp-database:1.0
-docker tag devops-tp-backend  <utilisateur>/tp-backend:1.0
-docker tag devops-tp-httpd    <utilisateur>/tp-httpd:1.0
-
-# Envoi des images sur Docker Hub
 docker push <utilisateur>/tp-database:1.0
-docker push <utilisateur>/tp-backend:1.0
-docker push <utilisateur>/tp-httpd:1.0
+# idem pour le backend et httpd
 ```
 
-- `docker tag` ne copie pas l'image : il lui ajoute un second nom.
-- Le numéro de version (`1.0`) remplace le tag `latest` utilisé jusqu'ici. Il permet d'identifier précisément une version, et de revenir à une version précédente si une nouvelle pose problème.
+`docker tag` ajoute un second nom à une image existante, sous la forme `utilisateur/image:version` attendue par Docker Hub. Un numéro de version (`1.0`) identifie précisément une version, contrairement à `latest`. Les images publiées sont visibles sur `https://hub.docker.com/u/<utilisateur>`. Par la suite, c'est le pipeline du TP 2 qui publie automatiquement `tp-devops-database`, `tp-devops-simple-api`, `tp-devops-httpd` et `tp-devops-front`.
 
-**Images publiées** (visibles sur https://hub.docker.com/u/<utilisateur>) :
+### Question 1-10 : Pourquoi mettre nos images dans un dépôt en ligne ?
 
-| Image | Contenu |
-|---|---|
-| `<utilisateur>/tp-database:1.0` | PostgreSQL 17.2 avec les scripts d'initialisation (tables et données) |
-| `<utilisateur>/tp-backend:1.0` | API Spring Boot connectée à la base |
-| `<utilisateur>/tp-httpd:1.0` | Apache configuré en reverse proxy vers le backend |
+Une image locale n'existe que sur ma machine. Un registre en ligne permet de :
+- **partager** les images avec l'équipe, sans qu'elle ait à les reconstruire ;
+- **déployer** sur un serveur qui télécharge l'image avec `docker pull`, sans code source ni outils de build ;
+- **garantir** que tout le monde exécute exactement la même version ;
+- **versionner** grâce aux tags, et revenir à une version précédente ;
+- **automatiser** : c'est la base de la CI/CD.
 
-Une courte description a été ajoutée à chaque image sur Docker Hub, pour pouvoir les réutiliser plus tard.
+## Ce que je retiens du TP 1
 
-### Question 1-10 : Pourquoi publier nos images dans un dépôt en ligne ?
+- Un conteneur est jetable : ce qui doit durer va dans un **volume**, ce qui varie va dans des **variables d'environnement**.
+- Les conteneurs se trouvent **par leur nom** sur un réseau Docker ; `localhost` désigne le conteneur lui-même.
+- Le multistage sépare ce qui sert à **construire** de ce qui sert à **exécuter**.
+- docker-compose transforme une suite de commandes en **un fichier reproductible**.
 
-Jusqu'ici, les images n'existaient que sur notre machine. Les publier dans un registre en ligne permet de :
-
-- **partager** : les autres membres de l'équipe récupèrent l'image prête à l'emploi avec `docker pull`, sans avoir à la reconstruire ;
-- **déployer** : un serveur de test ou de production télécharge directement l'image, sans code source ni outils de build ;
-- **garantir la cohérence** : tout le monde exécute exactement la même image, avec les mêmes versions, d'où la fin du « ça marche sur ma machine » ;
-- **versionner** : grâce aux tags, on conserve un historique et on peut revenir à une version antérieure ;
-- **automatiser** : c'est la base des chaînes d'intégration et de déploiement continus (CI/CD), où une image construite automatiquement est publiée puis déployée.
-
-Docker Hub est un registre public. Les entreprises utilisent souvent un registre privé (auto-hébergé ou chez un fournisseur cloud) pour garder leurs images confidentielles.
 ---
 
-# TP 2 – GitHub Actions
+# TP 2 – GitHub et GitHub Actions
 
-## Discover Github
+## Ce que j'ai appris sur Git et GitHub
 
-- Création d'une paire de clés SSH (`ssh-keygen -t rsa -b 4096`) : la clé **privée** reste sur le poste, la clé **publique** (`.pub`) est ajoutée au compte GitHub (*Settings > SSH and GPG keys*). Les opérations `clone` / `push` se font ensuite sans mot de passe.
-- Fork du projet de l'enseignant, clone en SSH, modification du `README.md`, puis `git add`, `git commit` et `git push origin main`.
-- Ajout d'une règle de protection sur la branche `main` (*Settings > Branches*) : elle empêche notamment le `push --force` et la suppression de la branche.
+**Les clés SSH.** Une paire de clés remplace le mot de passe : la clé **privée** reste sur ma machine et ne doit jamais être partagée ; la clé **publique** (`.pub`) est donnée à GitHub. Elle permet de cloner et de publier sans s'authentifier à chaque fois.
 
-## Pipeline CI/CD
+**Fork et clone.** Le fork copie un dépôt dans **mon compte GitHub** ; le clone le copie **sur ma machine**. J'ai forké le projet de l'enseignant, cloné le fork en SSH, puis publié une modification avec le cycle `git status` → `git add` → `git commit` → `git push`. `git status` montre en rouge ce qui est modifié mais pas encore ajouté, et en vert ce qui sera commité.
 
-Le pipeline est défini dans `.github/workflows/main.yml`. Il se déclenche à chaque push sur `main` ou `develop`, et à chaque pull request.
+**La protection de branche.** Une règle sur `main` empêche de supprimer la branche ou de réécrire son historique avec `push --force`. En équipe, elle peut aussi imposer une relecture par *pull request*.
 
-- **Job `test-backend` (CI)** : récupère le code (`actions/checkout`), installe le JDK 21 (`actions/setup-java`), puis lance `mvn clean verify --file ./backend/simpleapi/pom.xml`, qui compile l'API et exécute les tests unitaires et d'intégration.
-- **Job `build-and-push-docker-image` (CD)** : ne démarre que si les tests réussissent (`needs: test-backend`). Il se connecte à Docker Hub avec les secrets `DOCKERHUB_USERNAME` et `DOCKERHUB_TOKEN`, puis construit les trois images (backend, base de données, httpd) avec `docker/build-push-action`. Les images ne sont publiées que depuis la branche `main` : `push: ${{ github.ref == 'refs/heads/main' }}`.
+**Ne jamais publier de secret.** Un dépôt est public par défaut. Les mots de passe ont leur place dans les **secrets GitHub**, chiffrés.
 
-**Problèmes rencontrés :**
-- La branche s'appelait `master` alors que le workflow vise `main` : elle a été renommée (`git branch -m master main`), puis `main` a été définie comme branche par défaut sur GitHub.
-- Le fichier `SimpleApiApplication.java` était enregistré dans git sous le nom `SimpleapiApplication.java`. Windows ignore la casse, mais pas le runner Linux de GitHub : la compilation échouait. Correction avec `git mv` en passant par un nom intermédiaire.
-- Les secrets Docker Hub étaient vides dans le workflow : ils ont été recréés au bon endroit (*Settings > Secrets and variables > Actions > Repository secrets*).
+## Intégration continue (CI)
+
+Le pipeline est défini dans `.github/workflows/main.yml`. Il se déclenche à chaque push sur `main` ou `develop`, et à chaque *pull request*.
+
+```yaml
+  test-backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test with Maven
+        run: mvn clean verify --file ./backend/simpleapi/pom.xml
+```
+
+J'ai compris la différence entre `uses`, qui appelle une **action** toute faite (récupérer le code, installer Java), et `run`, qui exécute une **commande**. `mvn clean verify` nettoie les anciens builds, compile, puis lance les tests unitaires (une classe isolée) et les tests d'intégration (plusieurs composants avec une vraie base).
+
+**Ce que les erreurs m'ont appris :**
+- le pipeline ciblait `main`, mais ma branche s'appelait `master` : rien ne se déclenchait. Je l'ai renommée, puis définie comme branche par défaut ;
+- la compilation échouait sur GitHub mais pas chez moi : git connaissait le fichier sous le nom `SimpleapiApplication.java` alors que la classe s'appelait `SimpleApiApplication`. **Windows ignore la casse, Linux non.** C'est exactement ce que la CI sert à détecter : ce qui « marche sur ma machine » mais pas ailleurs.
 
 ### Question 2-1 : Que sont les Testcontainers ?
 
-Testcontainers est une bibliothèque Java qui démarre de vrais conteneurs Docker pendant les tests. Dans ce projet, elle lance une base PostgreSQL au début des tests d'intégration, puis la supprime à la fin. On teste ainsi l'application contre une vraie base de données, identique à celle de production, sans rien installer sur la machine : Docker suffit. L'URL `jdbc:tc:postgresql://...` de `src/test/resources/application.yml` déclenche ce mécanisme.
+Testcontainers est une bibliothèque Java qui démarre de **vrais conteneurs Docker pendant les tests**. Ici, elle lance une base PostgreSQL au début des tests d'intégration, puis la supprime à la fin. On teste ainsi l'application contre une vraie base, identique à la production, sans rien installer : il suffit que Docker soit disponible, ce qui est le cas sur les machines de GitHub. L'URL `jdbc:tc:postgresql://...` du fichier de configuration des tests déclenche ce mécanisme.
+
+## Livraison continue (CD)
+
+Un second job construit les images et les publie sur Docker Hub :
+
+```yaml
+  build-and-push-docker-image:
+    needs: test-backend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+      - name: Build image and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/simpleapi
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-simple-api:latest
+          push: ${{ github.ref == 'refs/heads/main' }}
+      # idem pour database, httpd et front
+```
+
+- La connexion utilise un **token** Docker Hub plutôt que le mot de passe du compte ;
+- `push: ${{ github.ref == 'refs/heads/main' }}` : les images sont **construites** sur toutes les branches, ce qui vérifie les Dockerfiles, mais **publiées** uniquement depuis `main`.
+
+J'ai aussi appris à lire les logs : quand la connexion échouait, la commande affichait `echo ""` et un `--username` vide. Un secret existant aurait été masqué par `***` : le secret n'était donc pas trouvé. Il avait été créé au mauvais endroit.
 
 ### Question 2-2 : Pourquoi utiliser des variables sécurisées ?
 
-Le fichier `main.yml` est versionné dans le dépôt, qui peut être public. Écrire le mot de passe Docker Hub dedans le rendrait lisible par tous. Les secrets GitHub sont chiffrés, ne sont plus lisibles une fois enregistrés, et sont masqués (`***`) dans les logs. Le pipeline peut donc s'authentifier sans que les identifiants n'apparaissent jamais dans le code ni dans les logs.
+Le fichier `main.yml` est dans le dépôt, qui peut être public : un mot de passe écrit dedans serait lisible par tous. Les secrets GitHub sont **chiffrés**, ne peuvent plus être relus une fois enregistrés, et sont **masqués (`***`) dans les logs**. Le pipeline peut donc s'authentifier sans que les identifiants apparaissent ni dans le code, ni dans les journaux d'exécution.
 
 ### Question 2-3 : Pourquoi `needs: test-backend` sur le job Docker ?
 
-Par défaut, les jobs d'un workflow s'exécutent en parallèle. Sans `needs`, les images seraient construites et publiées en même temps que les tests, donc même si ces tests échouent. Avec `needs: test-backend`, le job Docker attend la fin des tests et n'est exécuté que s'ils réussissent : on ne publie jamais une image dont le code ne passe pas les tests.
+Les jobs d'un workflow s'exécutent **en parallèle** par défaut. Sans `needs`, les images seraient publiées en même temps que les tests, donc **même si les tests échouent**. Avec `needs: test-backend`, le job attend la fin des tests et ne s'exécute que s'ils réussissent : on ne publie jamais une version cassée. Sur GitHub, la dépendance se voit sous forme de flèche entre les deux jobs.
 
 ### Question 2-4 : Pourquoi pousser les images Docker ?
 
-Publier les images sur Docker Hub en fait des livrables prêts à être déployés. N'importe quel serveur ou membre de l'équipe peut les récupérer avec `docker pull`, sans recompiler le code, et tout le monde utilise exactement la même version. C'est le principe de la livraison continue : chaque modification validée par les tests produit automatiquement une version déployable. Ce sont d'ailleurs ces images qu'Ansible déploie sur le serveur au TP 3.
+Publier les images transforme chaque version validée par les tests en un **livrable prêt à être déployé**. N'importe quel serveur peut le récupérer avec `docker pull`, sans recompiler, et tout le monde exécute la même version. C'est le principe de la livraison continue, et ce sont précisément ces images qu'Ansible déploie au TP 3.
+
+## Ce que je retiens du TP 2
+
+- **CI** : chaque push est compilé et testé automatiquement, sur une machine neutre.
+- **Continuous Delivery** : chaque version validée produit un livrable prêt à déployer. **Continuous Deployment** : ce livrable est en plus déployé automatiquement (TP 3).
+- Les jobs sont parallèles, sauf si `needs` crée une dépendance.
+- Les secrets ne se mettent jamais dans le code.
+- La partie SonarCloud (quality gate) n'a pas été réalisée. J'en retiens le principe : une analyse statique du code (bugs, vulnérabilités, couverture de tests, duplications) qui peut bloquer un code ne respectant pas des seuils de qualité.
 
 ---
 
 # TP 3 – Ansible
 
-## Mise en place
+## Ce que j'ai compris d'Ansible
 
-Ansible n'étant pas disponible sous Windows, il est utilisé dans WSL (Ubuntu) : `sudo apt install ansible`.
+Ansible est un outil de **gestion de configuration et de déploiement** : il installe, configure et déploie des applications sur des serveurs, à partir de fichiers YAML.
 
-La clé privée fournie par l'enseignant est copiée dans `~/.ssh` côté Ubuntu, avec des droits restreints (`chmod 400`), car SSH refuse une clé lisible par d'autres utilisateurs. Elle n'est jamais placée dans le dépôt git.
+- **Sans agent** : il se connecte aux serveurs **par SSH** et n'a besoin que de Python côté serveur. Il tourne sur ma machine (ici dans WSL, car Ansible ne fonctionne pas sous Windows) et pilote le serveur à distance.
+- **Déclaratif** : on décrit l'**état voulu** (`state: present`, `state: started`), pas les commandes à taper.
+- **Idempotent** : relancer une tâche ne change rien si l'état est déjà atteint. La première exécution affiche `changed`, les suivantes `ok`.
 
-```bash
-ssh -i ~/.ssh/takima_key admin@<serveur>
-ansible all -m ping --private-key=~/.ssh/takima_key -u admin
-```
+**La connexion SSH.** La clé privée fournie doit avoir des droits restreints (`chmod 400`) : SSH refuse une clé lisible par d'autres utilisateurs. J'ai aussi appris qu'un fichier téléchargé sous Windows peut contenir des fins de ligne `\r` qui le rendent illisible pour SSH, et que `ssh-keygen -y -f <clé>` permet de vérifier qu'une clé est valide avant d'accuser le serveur.
 
-Le module `ping` répond `pong` : le serveur est joignable, l'utilisateur `admin` existe et l'authentification SSH fonctionne. Sans l'option `-u admin` ni la clé, Ansible ne peut pas s'authentifier et la commande échoue.
-
-Installation d'Apache en commandes ad hoc :
-
-```bash
-ansible all -m apt -a "name=apache2 state=present" --private-key=~/.ssh/takima_key -u admin --become
-ansible all -m shell -a 'echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html' --private-key=~/.ssh/takima_key -u admin --become
-ansible all -m service -a "name=apache2 state=started" --private-key=~/.ssh/takima_key -u admin --become
-```
-
-Sans `--become`, l'installation échoue : installer un paquet demande les droits administrateur, qu'Ansible obtient via `sudo`.
+**Le module `ping`** ne se contente pas de tester le réseau : sa réponse `pong` prouve que le serveur est joignable, que l'utilisateur existe et que l'authentification fonctionne. Sans `-u admin` ni la clé, il échoue. Sans `--become`, l'installation d'Apache échoue aussi : il faut les droits administrateur, obtenus via `sudo`.
 
 ### Question 3-1 : Documenter l'inventaire et les commandes de base
-
-**Inventaire** (`ansible/inventories/setup.yml`) :
 
 ```yaml
 all:
@@ -616,70 +410,192 @@ all:
       hosts: <serveur>
 ```
 
-- `all` regroupe tous les serveurs de l'inventaire.
-- `vars` définit des variables appliquées à tous les serveurs : l'utilisateur de connexion (`admin`, l'utilisateur par défaut des serveurs Debian) et le chemin de la clé SSH privée. Il n'est plus nécessaire de les passer à chaque commande.
-- `children` organise les serveurs en groupes ; le groupe `prod` contient notre serveur. On pourrait ajouter d'autres groupes (bases de données, proxys…) et cibler chacun séparément.
-
-Le fichier ne contient que le chemin de la clé, pas la clé elle-même : il peut être versionné sans risque.
-
-**Commandes de base :**
+- `vars` : variables appliquées à tous les serveurs, ici l'utilisateur et le **chemin** de la clé. La clé elle-même n'est pas dans le dépôt ;
+- `children` : les **groupes** de serveurs. Le groupe `prod` contient mon serveur ; on pourrait en ajouter d'autres et les cibler séparément.
 
 | Commande | Rôle |
 |---|---|
-| `ansible all -i inventories/setup.yml -m ping` | Vérifie la connexion et l'authentification sur tous les serveurs |
-| `ansible all -i inventories/setup.yml -m setup -a "filter=ansible_distribution*"` | Récupère des *facts* : des informations découvertes sur le serveur, ici sa distribution (Debian) et sa version |
-| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | Désinstalle Apache. Relancer la commande ne change rien : Apache est déjà absent |
+| `ansible all -i inventories/setup.yml -m ping` | vérifie la connexion et l'authentification |
+| `ansible all -i inventories/setup.yml -m setup -a "filter=ansible_distribution*"` | lit des *facts* : des informations découvertes sur le serveur (ici, Debian et sa version) |
+| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | désinstalle Apache ; relancée, la commande ne change plus rien |
 
-Ansible est **déclaratif et idempotent** : on décrit l'état voulu (`state: present` ou `absent`), et Ansible n'agit que si le serveur n'est pas déjà dans cet état. La première exécution affiche `CHANGED`, les suivantes `SUCCESS` sans changement.
+## Playbooks et rôles
+
+Un **playbook** regroupe des tâches dans un fichier que l'on peut rejouer. Il se vérifie avec `--syntax-check` avant d'être exécuté. Un **rôle**, créé avec `ansible-galaxy init`, range des tâches réutilisables dans une structure standard ; je n'ai gardé que les dossiers `tasks` et `handlers`.
 
 ### Question 3-2 : Documenter le playbook
 
-**`ansible/playbook.yml`** :
+Le playbook final comporte deux parties :
 
 ```yaml
+# Installer Docker, avec le Python du système
 - hosts: all
   gather_facts: true
   become: true
-
   roles:
     - docker
+
+# Déployer l'application, avec le Python qui contient le SDK Docker
+- hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    ansible_python_interpreter: /opt/docker_venv/bin/python
+  roles:
+    - network
+    - database
+    - app
+    - front
+    - proxy
 ```
 
-- `hosts: all` : le playbook s'applique à tous les serveurs de l'inventaire.
-- `gather_facts: true` : Ansible collecte les facts du serveur, dont la version de Debian, utilisée pour choisir le bon dépôt Docker.
-- `become: true` : les tâches s'exécutent en administrateur.
-- `roles` : la liste des rôles à appliquer.
+- `hosts: all` : tous les serveurs de l'inventaire ;
+- `gather_facts: true` : collecte les facts, dont la version de Debian, utilisée pour choisir le bon dépôt Docker ;
+- `become: true` : exécution en administrateur ;
+- `ansible_python_interpreter` : les modules Docker d'Ansible ont besoin du SDK Python installé dans `/opt/docker_venv`. Ce SDK n'existe qu'après l'installation de Docker, d'où les deux parties.
 
-Le playbook se vérifie avec `ansible-playbook -i inventories/setup.yml playbook.yml --syntax-check`, puis s'exécute sans cette option.
+Le rôle `docker` suit la documentation officielle : paquets prérequis (`apt`), clé GPG de Docker (`get_url`), dépôt officiel adapté à la version de Debian (`apt_repository`), installation de `docker-ce`, SDK Docker pour Python dans un environnement virtuel (`pip`), puis démarrage du service (`service`). Par rapport au modèle de l'énoncé, j'ai remplacé `apt_key`, déprécié sous Debian 12, et rendu l'installation du SDK idempotente avec le module `pip`. Relancer le playbook n'affiche alors que des tâches `ok`.
 
-**Le rôle `docker`** a été créé avec `ansible-galaxy init roles/docker`. Seuls les dossiers utiles ont été conservés : `tasks` (les tâches) et `handlers`. Ses tâches (`roles/docker/tasks/main.yml`) installent Docker en suivant la documentation officielle :
+## Déploiement de l'application
 
-1. installation des paquets prérequis (`apt`) ;
-2. ajout de la clé GPG de Docker (`get_url`), qui permet de vérifier l'authenticité des paquets ;
-3. ajout du dépôt officiel Docker (`apt_repository`), adapté à la version de Debian grâce au fact `distribution_release` ;
-4. installation de `docker-ce` (`apt`) ;
-5. installation du SDK Docker pour Python dans un environnement virtuel (`pip`), nécessaire aux modules Ansible `docker_container` et `docker_network` ;
-6. démarrage du service Docker et activation au démarrage du serveur (`service`).
+Chaque partie de l'application a son rôle : `network` crée le réseau (`docker_network`), puis `database`, `app`, `front` et `proxy` lancent chacun un conteneur à partir des images publiées par le pipeline. Les valeurs communes sont dans `group_vars/all/vars.yml` :
 
-**Écarts par rapport au modèle de l'énoncé :**
-- le module `apt_key` est déprécié sous Debian 12 ; la clé est téléchargée avec `get_url` dans `/etc/apt/keyrings`, et référencée par `signed-by` dans le dépôt, comme le recommande la documentation de Docker ;
-- la commande `pip install docker` était exécutée à chaque lancement du playbook ; le module `pip` avec l'option `virtualenv` la rend idempotente.
+```yaml
+docker_user: <utilisateur>
+docker_network: app-network
+db_host: database
+db_port: "5432"
+db_name: db
+db_user: usr
+backend_host: backend
+backend_port: "8080"
+front_host: front
+httpd_port: "80"
+db_password: "{{ vault_db_password }}"
+```
 
-Relancer le playbook n'affiche que des tâches `ok` : Docker est déjà installé, rien n'est modifié. Ranger l'installation dans un rôle la rend réutilisable et garde le playbook court et lisible.
+### Question 3-3 : Documenter la configuration des tâches `docker_container`
 
-Vérification sur le serveur :
+Exemple du rôle `app` :
+
+```yaml
+- name: Launch backend API
+  community.docker.docker_container:
+    name: "{{ backend_host }}"
+    image: "{{ docker_user }}/tp-devops-simple-api:latest"
+    pull: true
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_network }}"
+    env:
+      DB_HOST: "{{ db_host }}"
+      DB_PORT: "{{ db_port }}"
+      DB_NAME: "{{ db_name }}"
+      DB_USER: "{{ db_user }}"
+      DB_PASSWORD: "{{ db_password }}"
+      BACKEND_PORT: "{{ backend_port }}"
+```
+
+- `name` : le nom du conteneur, qui sert aussi d'adresse sur le réseau (`database`, `backend`, `front`, `httpd`) ;
+- `image` : l'image publiée sur Docker Hub par le pipeline ;
+- `pull: true` : télécharge la dernière version de l'image ; le conteneur est recréé si elle a changé ;
+- `state: started` : l'état voulu, un conteneur qui tourne ;
+- `restart_policy: unless-stopped` : redémarrage automatique en cas de plantage ou de redémarrage du serveur ;
+- `networks` : rattache le conteneur au réseau `app-network` ;
+- `env` : les variables d'environnement, qui remplissent les `${...}` de `application.yml`. La base reçoit son nom, son utilisateur et son mot de passe ; le proxy reçoit l'adresse du backend et du front ;
+- `volumes` (base uniquement) : un volume nommé, pour la persistance ;
+- `ports` (proxy uniquement) : seul Apache publie le port 80.
+
+On retrouve exactement les notions du TP 1 (nom, réseau, variables, volume, port), mais décrites comme un état voulu et appliquées à distance.
+
+## Déploiement continu
+
+Un troisième job du pipeline lance le playbook après la publication des images, uniquement depuis `main` :
+
+```yaml
+  deploy:
+    needs: build-and-push-docker-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: pipx install --force --include-deps ansible
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/takima_key
+          chmod 400 ~/.ssh/takima_key
+      - name: Deploy with Ansible
+        working-directory: ./ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > .vault_pass
+          trap 'rm -f .vault_pass' EXIT
+          ansible-playbook -i inventories/setup.yml playbook.yml --vault-password-file .vault_pass
+```
+
+La clé SSH du serveur est un secret GitHub, écrite au chemin attendu par l'inventaire. Je l'ai vérifié en modifiant un texte de l'API : après le push, la nouvelle version était en ligne sans aucune action manuelle.
+
+### Question : est-il vraiment sûr de déployer automatiquement chaque nouvelle image ?
+
+Non. Une image boguée ou compromise (compte Docker Hub piraté, dépendance malveillante) partirait directement en production. Pour sécuriser :
+- utiliser des **tags versionnés** plutôt que `latest`, pour savoir exactement ce qui est déployé et pouvoir revenir en arrière ;
+- ne déployer qu'**après les tests et une quality gate**, ce que `needs` garantit déjà en partie ;
+- passer par un environnement de **staging** avant la production ;
+- exiger une **validation manuelle** avant la mise en production ;
+- prévoir un **rollback** vers la version précédente ;
+- **scanner les images** pour détecter les vulnérabilités connues.
+
+## Front-end
+
+Le front-end fourni est une application Vue.js, construite puis servie par nginx. Son adresse d'API est fixée **au moment du build** (`VUE_APP_API_URL` dans `.env.production`). Comme le front et l'API utilisent les mêmes chemins (`/departments`), le proxy les sépare par préfixe :
+
+```apache
+<VirtualHost *:${HTTPD_PORT}>
+ProxyPreserveHost On
+ProxyPass /api/ http://${BACKEND_HOST}:${BACKEND_PORT}/
+ProxyPassReverse /api/ http://${BACKEND_HOST}:${BACKEND_PORT}/
+ProxyPass / http://${FRONT_HOST}:80/
+ProxyPassReverse / http://${FRONT_HOST}:80/
+</VirtualHost>
+```
+
+J'ai retenu qu'Apache applique la **première** règle qui correspond : `/api/` doit précéder `/`. Le front et l'API étant servis à la même adresse, il n'y a pas de problème de CORS. Quand une URL `/api/...` a renvoyé une erreur 404 de Spring Boot, j'ai compris que la requête atteignait bien le backend, mais avec le préfixe `/api` : le serveur tournait encore avec l'ancienne configuration, en attendant la fin du pipeline.
+
+## Ansible Vault
+
+Pour ne plus passer le mot de passe de la base en clair, je l'ai chiffré avec **Ansible Vault** :
 
 ```bash
-ansible all -i inventories/setup.yml -m command -a "docker --version" --become
-ansible all -i inventories/setup.yml -m command -a "systemctl is-active docker" --become
+ansible-vault encrypt group_vars/all/vault.yml
 ```
 
-### Question 3-3 : Documenter la configuration des tâches docker_container
+- `vault.yml` contient `vault_db_password`, chiffré en AES-256 : le fichier peut être versionné sans risque ;
+- `vars.yml` y fait référence avec `db_password: "{{ vault_db_password }}"` ;
+- en local, le playbook se lance avec `--ask-vault-pass` ; dans le pipeline, le mot de passe du vault est un secret GitHub, écrit dans un fichier temporaire supprimé à la fin de l'étape ;
+- un fichier `.gitattributes` (`*.yml text eol=lf`) empêche git de convertir les fins de ligne sous Windows, ce qui corromprait le fichier chiffré.
 
-<!-- À COMPLÉTER après le déploiement de l'application -->
+Au final, aucun secret n'apparaît en clair, ni dans le dépôt, ni dans les logs.
 
-### Déploiement continu : est-il sûr de déployer automatiquement chaque nouvelle image ?
+## Ce que je retiens du TP 3
 
-<!-- À COMPLÉTER -->
+- Ansible décrit un **état voulu** et l'applique à distance par SSH, de façon idempotente.
+- L'inventaire dit **où** et **comment** se connecter ; le playbook dit **quoi** faire ; les rôles rendent ce « quoi » réutilisable.
+- Associé à GitHub Actions, il ferme la boucle : du code poussé au serveur en production, sans intervention manuelle.
+- Les secrets ont leur place dans un coffre : secrets GitHub pour le pipeline, Ansible Vault pour les fichiers versionnés.
 
+---
 
+# Bilan
+
+Ces trois TP m'ont fait parcourir toute la chaîne DevOps sur une même application : la **conteneuriser** pour qu'elle fonctionne partout de la même façon, la **tester et la publier** automatiquement à chaque modification, puis la **déployer** automatiquement sur un vrai serveur.
+
+Trois idées traversent l'ensemble :
+- **tout décrire dans des fichiers versionnés** (Dockerfile, docker-compose, workflow, playbook), pour que l'infrastructure soit reproductible ;
+- **séparer la configuration et les secrets du code** (variables d'environnement, `.env`, secrets GitHub, Vault) ;
+- **automatiser avec des garde-fous** : on ne publie que si les tests passent, et on ne déploie que ce qui a été publié.
+
+Enfin, les erreurs rencontrées m'ont appris une méthode : lire attentivement les logs, comprendre **où** se situe le problème (ma machine, le conteneur, le réseau, GitHub, le serveur), et tester chaque couche séparément.
